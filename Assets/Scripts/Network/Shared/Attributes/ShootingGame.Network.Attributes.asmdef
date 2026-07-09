@@ -1,0 +1,13 @@
+{
+    "name": "ShootingGame.Network.Attributes",
+    "rootNamespace": "ShootingGame.Network",
+    "references": [],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

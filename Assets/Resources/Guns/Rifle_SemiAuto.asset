@@ -1,0 +1,26 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c238f71214f26cf4ea2ff299055d664c, type: 3}
+  m_Name: Rifle_SemiAuto
+  m_EditorClassIdentifier: 
+  GunName: "\u534A\u81EA\u52A8\u6B65\u67AA"
+  FireMode: 0
+  FireRate: 0.15
+  Damage: 25
+  ClipSize: 30
+  ReloadTime: 2
+  Range: 200
+  SpreadAngle: 0
+  Bullet: 0
+  MuzzleFlashPrefab: {fileID: 0}
+  ShellPrefab: {fileID: 0}
+  FireSound: {fileID: 0}

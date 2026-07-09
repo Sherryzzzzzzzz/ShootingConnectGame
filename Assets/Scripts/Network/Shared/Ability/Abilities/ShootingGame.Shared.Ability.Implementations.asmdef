@@ -1,0 +1,18 @@
+{
+    "name": "ShootingGame.Shared.Ability.Implementations",
+    "rootNamespace": "ShootingGame.Shared.Ability",
+    "references": [
+        "ShootingGame.Shared.Ability",
+        "ShootingGame.Shared.ECS",
+        "ShootingGame.Shared.Math",
+        "ShootingGame.Shared.Simulation"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

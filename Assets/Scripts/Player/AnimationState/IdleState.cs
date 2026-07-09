@@ -1,45 +1,58 @@
-using System.Collections;
-using System.Collections.Generic;
 using Animancer;
 using UnityEngine;
+using InputFrame = ShootingGame.Shared.Simulation.InputFrame;
 
 public class IdleState : PlayerStateBase
 {
-    private AnimancerComponent _Animancer;
-    private ClipTransition _IdleAnimation;
+    private AnimancerComponent animancer;
+    private ClipTransition idleClip;
 
-    public override void Init(IStateOwner owner)
+    public override void Init(PlayerModel model)
     {
-        base.Init(owner);
-        _Animancer = playerModel.animancer;
-        _IdleAnimation = playerModel.AnimationSet.GetClip(PlayerAnimType.Rifle_Idle);
-    }
+        base.Init(model);
 
+        animancer = playerModel.animancer;
+
+        idleClip = playerModel.AnimationSet.GetClip(PlayerAnimType.Rifle_Idle);
+
+        if (idleClip == null)
+        {
+            Debug.LogError("IdleClip not found: Rifle_Idle");
+        }
+    }
     public override void Enter()
     {
-        base.Enter();
-        _Animancer.Play(_IdleAnimation,0.25f,FadeMode.FromStart);
+        if (animancer == null || idleClip == null)
+        {
+            Debug.LogError($"[IdleState] Cannot Enter: animancer or idleClip is null");
+            return;
+        }
+        animancer.Play(idleClip, 0.2f);
     }
 
-    public override void Update()
+    public override void Tick(InputFrame input, float dt)
     {
-        base.Update();
-        if (playerController.movement.magnitude != 0)
+        if (playerController == null) return;
+
+        if (input.Jump)
         {
-            playerModel.ChangeAnimationState(PlayerAnimationState.turn);
+            playerModel.ChangeAnimationState(PlayerAnimationState.jump);
+            return;
         }
 
-        if (playerController.jump)
+        if (!playerController.IsGrounded)
         {
             playerModel.ChangeAnimationState(PlayerAnimationState.fall);
-        }
-        
-        if (!playerController.isGround)
-        {
-            playerModel.ChangeAnimationState(PlayerAnimationState.fall);
+            return;
         }
 
-        if (playerController.aim)
+        if (input.Movement.SqrMagnitude > 0.01f)
+        {
+            playerModel.ChangeAnimationState(PlayerAnimationState.move);
+            return;
+        }
+
+        if (input.Aim)
         {
             playerModel.ChangeAnimationState(PlayerAnimationState.aim);
         }

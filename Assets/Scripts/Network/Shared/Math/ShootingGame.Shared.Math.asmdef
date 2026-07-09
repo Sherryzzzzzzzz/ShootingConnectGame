@@ -1,0 +1,13 @@
+{
+    "name": "ShootingGame.Shared.Math",
+    "rootNamespace": "ShootingGame.Shared.Math",
+    "references": [],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

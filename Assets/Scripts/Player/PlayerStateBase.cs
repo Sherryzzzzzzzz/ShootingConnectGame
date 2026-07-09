@@ -1,35 +1,39 @@
-using System.Collections;
-using System.Collections.Generic;
-using UnityEngine;
-
-public class PlayerStateBase: StateBase
+using InputFrame = ShootingGame.Shared.Simulation.InputFrame;
+public abstract class PlayerStateBase : StateBase
 {
     protected PlayerModel playerModel;
-    protected PlayerController playerController;
-    
-    public override void Enter()
-    {
-        MonoManager.Instance.AddUpdateAction(Update);
-    }
 
-    public override void Exit()
+    // 玩家控制器（惰性解析，解决 PlayerModel.Start() 在 NetPlayerController 添加前执行的问题）
+    private NetPlayerController _cachedController;
+    protected NetPlayerController playerController
     {
-        MonoManager.Instance.RemoveUpdateAction(Update);
-    }
-
-    public override void Update()
-    {
-        
+        get
+        {
+            if (_cachedController == null && playerModel != null)
+            {
+                _cachedController = playerModel.GetComponent<NetPlayerController>();
+            }
+            return _cachedController;
+        }
     }
 
     public override void Init(IStateOwner owner)
     {
-        playerModel = (PlayerModel)owner;
-        playerController = PlayerController.Instance;
+        playerModel = owner as PlayerModel;
+        _cachedController = playerModel != null ? playerModel.GetComponent<NetPlayerController>() : null;
+        Init(playerModel);
     }
 
-    public override void Destroy()
+    public virtual void Init(PlayerModel model)
     {
-        
+        playerModel = model;
+        // playerController 通过上面的属性惰性获取
     }
+
+    public override void Enter() { }
+    public override void Exit() { }
+    public override void Update() { }
+    public override void Destroy() { }
+
+    public override void Tick(InputFrame input, float dt) { }
 }

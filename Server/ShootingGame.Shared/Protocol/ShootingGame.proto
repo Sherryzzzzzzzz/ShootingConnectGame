@@ -1,0 +1,329 @@
+syntax = "proto3";
+
+package shootinggame;
+
+option csharp_namespace = "ShootingGame.Shared.Protocol";
+
+// ==================== Enum Definitions ====================
+
+enum RequestCode {
+  NONE = 0;
+  USER = 1;
+  MATCHING = 2;
+  BATTLE = 3;
+}
+
+enum ActionCode {
+  // User
+  LOGIN = 0;
+  LOGIN_RESULT = 1;
+
+  // Matching (100-199)
+  JOIN_QUEUE = 100;
+  LEAVE_QUEUE = 101;
+  MATCH_FOUND = 102;
+  START_ENTER_BATTLE = 103;
+  ONLINE_PLAYERS = 104;
+
+  // Room (150-169)
+  ROOM_LIST = 150;
+  CREATE_ROOM = 151;
+  JOIN_ROOM = 152;
+  LEAVE_ROOM = 153;
+  ROOM_UPDATE = 154;
+
+  // Battle (200-299)
+  BATTLE_READY = 200;
+  BATTLE_START = 201;
+  BATTLE_OPERATION = 202;
+  BATTLE_FRAME = 203;
+  HIT_EVENT = 204;
+  GAME_OVER = 205;
+  PING = 206;
+  PONG = 207;
+  PLAYER_JOINED = 208;
+  PLAYER_LEFT = 209;
+  DISCONNECT = 210;
+}
+
+enum ReturnCode {
+  SUCCESS = 0;
+  FAIL = 1;
+  NOT_FOUND = 2;
+  ALREADY_EXISTS = 3;
+  SERVER_FULL = 4;
+}
+
+enum GameMessageType {
+  INPUT_MESSAGE = 0;
+  WORLD_STATE_MESSAGE = 1;
+  DAMAGE_EVENT = 2;
+  CONNECTION_REQUEST = 3;
+  CONNECTION_ACCEPTED = 4;
+  PLAYER_JOINED = 5;
+  PLAYER_LEFT = 6;
+  DISCONNECT = 7;
+  HEARTBEAT = 8;
+  ABILITY_EVENT = 9;
+}
+
+// ==================== Core Message ====================
+
+message MainPack {
+  RequestCode request_code = 1;
+  ActionCode action_code = 2;
+  ReturnCode return_code = 3;
+  int64 timestamp = 4;
+  string str = 5;
+  int32 int_val = 6;
+  BattleInfo battle_info = 7;
+  UserInfo user_info = 8;
+  RoomInfo room_info = 9;
+  repeated RoomInfo room_infos = 10;
+  repeated BattlePlayerPack battle_player_packs = 11;
+}
+
+// ==================== User Messages ====================
+
+message UserInfo {
+  int32 user_id = 1;
+  string username = 2;
+  string password = 3;
+}
+
+message BattlePlayerPack {
+  int32 user_id = 1;
+  int32 battle_id = 2;
+  string player_name = 3;
+  int32 team_id = 4;
+}
+
+message RoomInfo {
+  int32 room_id = 1;
+  string room_name = 2;
+  string creator_name = 3;
+  int32 player_count = 4;
+  int32 max_players = 5;
+  int32 status = 6;
+}
+
+// ==================== Battle Messages ====================
+
+message BattleInfo {
+  int32 operation_id = 1;
+  int32 battle_id = 2;
+  int32 rand_seed = 3;
+  int32 client_acked_frame = 4;
+
+  PlayerOperation self_operation = 5;
+  repeated PlayerOperation operations = 6;
+  repeated AllPlayerOperation all_player_operations = 7;
+  repeated HitEventMsg hit_events = 8;
+  repeated PlayerStateMsg player_states = 9;
+  repeated BattlePlayerInfo battle_players = 10;
+}
+
+message BattlePlayerInfo {
+  int32 player_id = 1;
+  int32 team_id = 2;
+  int32 user_id = 3;
+  string player_name = 4;
+  Vec3Msg spawn_position = 5;
+}
+
+// ==================== Player Operations ====================
+
+message PlayerOperation {
+  int32 player_id = 1;
+  float move_x = 2;
+  float move_y = 3;
+  float aim_yaw = 4;
+  float aim_pitch = 5;
+  bool fire = 6;
+  bool jump = 7;
+  int32 attack_id = 8;
+  int32 client_frame_id = 9;
+  repeated AttackOperation attack_operations = 10;
+  bool run = 11;
+  bool aim = 12;
+  bool reload = 13;
+  repeated AbilityEventMsg ability_events = 14;
+}
+
+message AttackOperation {
+  int32 attack_id = 1;
+  float toward_x = 2;
+  float toward_y = 3;
+  float aim_pitch = 4;
+  int32 client_frame_id = 5;
+  Vec3Msg spawn_pos = 6;
+}
+
+// ==================== Frame Sync ====================
+
+message AllPlayerOperation {
+  int32 frame_id = 1;
+  repeated PlayerOperation operations = 2;
+  repeated PlayerStateMsg player_states = 3;
+  repeated HitEventMsg hit_events = 4;
+}
+
+// ==================== State Sync ====================
+
+message PlayerStateMsg {
+  int32 player_id = 1;
+  Vec3Msg position = 2;
+  int32 hp = 3;
+  bool is_dead = 4;
+  Vec3Msg velocity = 5;
+  bool is_grounded = 6;
+  int32 state_enum = 7;
+  float fire_cooldown = 8;
+  float rotation_y = 9;
+  bool is_running = 10;
+  int32 current_ammo = 11;
+  bool is_reloading = 12;
+  int64 tag_bitmask = 13;
+  repeated AbilityInstanceMsg active_abilities = 14;
+}
+
+// ==================== Hit Events ====================
+
+message HitEventMsg {
+  int32 attack_id = 1;
+  int32 attacker_id = 2;
+  int32 victim_id = 3;
+  int32 damage = 4;
+  bool is_kill = 5;
+  Vec3Msg hit_point = 6;
+  int32 hit_frame_id = 7;
+}
+
+// ==================== Ability Messages ====================
+
+message AbilityEventMsg {
+  bytes player_id = 1;
+  uint32 instance_id = 2;
+  bytes asset_id = 3;
+  uint32 event_type = 4;
+}
+
+message AbilityInstanceMsg {
+  uint32 instance_id = 1;
+  bytes asset_id = 2;
+  uint32 state = 3;
+  float cooldown_remaining = 4;
+  float duration_remaining = 5;
+  int64 applied_tags_mask = 6;
+}
+
+// ==================== Gameplay Messages (Path A) ====================
+
+message GameMessage {
+  GameMessageType msg_type = 1;
+
+  oneof payload {
+    InputBatchMsg input_batch = 10;
+    WorldStateMsg world_state = 11;
+    DamageEventMsg damage_event = 12;
+    ConnectionRequestMsg connection_request = 13;
+    ConnectionAcceptedMsg connection_accepted = 14;
+    PlayerJoinedMsg player_joined = 15;
+    PlayerLeftMsg player_left = 16;
+    DisconnectMsg disconnect = 17;
+    HeartbeatMsg heartbeat = 18;
+    AbilityEventMsg ability_event = 19;
+  }
+}
+
+message InputBatchMsg {
+  int32 count = 1;
+  repeated InputFrameMsg frames = 2;
+}
+
+message InputFrameMsg {
+  int32 tick = 1;
+  Vec2Msg movement = 2;
+  uint32 flags = 3;
+  float aim_yaw = 4;
+  float aim_pitch = 5;
+}
+
+message WorldStateMsg {
+  int32 server_tick = 1;
+  int32 player_count = 2;
+  repeated PlayerSnapMsg players = 3;
+  repeated int32 last_processed_input_ticks = 4 [packed = true];
+}
+
+message PlayerSnapMsg {
+  int32 tick = 1;
+  Vec3Msg position = 2;
+  QuatMsg rotation = 3;
+  Vec3Msg velocity = 4;
+  float vertical_velocity = 5;
+  bool is_grounded = 6;
+  uint32 state = 7;
+  float fire_cooldown = 8;
+  uint32 health = 9;
+  int32 current_ammo = 10;
+  bool is_reloading = 11;
+  float reload_timer = 12;
+  int64 tag_bitmask = 13;
+  uint32 active_ability_count = 14;
+  repeated AbilityInstanceMsg active_abilities = 15;
+}
+
+message DamageEventMsg {
+  bytes target_id = 1;
+  bytes shooter_id = 2;
+  bytes damage = 3;
+  bytes new_health = 4;
+  Vec3Msg hit_point = 5;
+}
+
+message ConnectionRequestMsg {
+  uint32 protocol_version = 1;
+}
+
+message ConnectionAcceptedMsg {
+  bytes player_id = 1;
+  int32 tick_rate = 2;
+  int32 server_tick = 3;
+}
+
+message PlayerJoinedMsg {
+  bytes player_id = 1;
+}
+
+message PlayerLeftMsg {
+  bytes player_id = 1;
+}
+
+message DisconnectMsg {
+  uint32 reason = 1;
+}
+
+message HeartbeatMsg {
+  int32 timestamp = 1;
+}
+
+// ==================== Math Types ====================
+
+message Vec2Msg {
+  float x = 1;
+  float y = 2;
+}
+
+message Vec3Msg {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+}
+
+message QuatMsg {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+  float w = 4;
+}

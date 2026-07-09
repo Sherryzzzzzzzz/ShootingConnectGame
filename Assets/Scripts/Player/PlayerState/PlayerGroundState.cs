@@ -1,68 +1,68 @@
-using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.PlayerLoop;
+using InputFrame = ShootingGame.Shared.Simulation.InputFrame;
+
 
 public class PlayerGroundState : PlayerStateBase
 {
     private float aimSpeed;
-    float speed = 0;
 
     [Header("倾斜参数")]
-    public float maxTiltAngle = 15f; // 最大左右倾斜角度
-    public float tiltSmooth = 5f;    // 倾斜平滑度
+    public float maxTiltAngle = 15f;
+    public float tiltSmooth = 5f;
 
     private float currentTilt = 0f;
+    private bool _lastJumpInput;
 
-    public override void Update()
+    public override void Tick(InputFrame input, float dt)
     {
-        base.Update();
-        
+        // playerController 可能尚未就绪（场景切换时序问题）
+        if (playerController == null) return;
 
-        // === 正常移动逻辑 ===
-        if (playerController.running)
-        {
-            aimSpeed = playerModel.runSpeed * playerController.movement.magnitude;
-        }
+        // === 速度计算 ===
+        if (input.Run)
+            aimSpeed = playerModel.runSpeed * input.Movement.Magnitude;
         else
+            aimSpeed = playerModel.walkSpeed * input.Movement.Magnitude;
+
+        // === 开火（cam 为空时跳过旋转） ===
+        if (input.Fire)
         {
-            aimSpeed = playerModel.walkSpeed * playerController.movement.magnitude;
-        }
-        
-        
-        if (playerController.fire)
-        {
-            Vector3 camForward = Camera.main.transform.forward;
-            camForward.y = 0f; // 忽略俯仰角，只取水平面方向
-            camForward.Normalize();
-            
-            Quaternion targetRotation = Quaternion.LookRotation(camForward, Vector3.up);
-            
-            float rotationSpeed = 10f;
-            playerModel.transform.rotation = Quaternion.Slerp(
-                playerModel.transform.rotation,
-                targetRotation,
-                rotationSpeed * Time.deltaTime
-            );
-            
+            if (playerController.cam != null)
+            {
+                Vector3 camForward = playerController.cam.transform.forward;
+                camForward.y = 0f;
+                camForward.Normalize();
+
+                Quaternion targetRotation = Quaternion.LookRotation(camForward, Vector3.up);
+
+                float rotationSpeed = 10f;
+                playerModel.transform.rotation = Quaternion.Slerp(
+                    playerModel.transform.rotation,
+                    targetRotation,
+                    rotationSpeed * dt
+                );
+            }
+
             playerModel.Fire();
         }
 
-        
-        float rad = Mathf.Atan2(playerController.localMovement.x, playerController.localMovement.z);
-        playerModel.transform.Rotate(0,rad*playerController.rotationSpeed*Time.deltaTime,0);
-        
-        if (playerController.jump)
+        // === 跳跃（仅在按下瞬间触发，长按不会反复跳跃） ===
+        bool jumpJustPressed = input.Jump && !_lastJumpInput;
+        _lastJumpInput = input.Jump;
+
+        if (jumpJustPressed)
         {
-            playerModel.gravityVector.y = Mathf.Sqrt(playerModel.gravity * -2.0f * playerModel.jumpHeight);
+            playerModel.gravityVector.y =
+                Mathf.Sqrt(playerModel.gravity * -2.0f * playerModel.jumpHeight);
+
             playerModel.ChangePlayerState(PlayerState.sky);
+            return;
         }
 
-        if (playerController.aim)
+        // === 进入瞄准 ===
+        if (input.Aim)
         {
             playerModel.ChangePlayerState(PlayerState.aim);
         }
     }
-    
 }
-

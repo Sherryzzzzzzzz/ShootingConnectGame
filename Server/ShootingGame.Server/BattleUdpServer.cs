@@ -1,0 +1,428 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
+using ShootingGame.Shared.Protocol;
+
+namespace ShootingGame.Server
+{
+    /// <summary>
+    /// UDP Battle Server handling real-time battle communication.
+    /// Listens on port 7777 for UDP packets.
+    /// </summary>
+    public class BattleUdpServer
+    {
+        private readonly int _port;
+        private UdpClient _udp;
+        private volatile bool _running;
+        private Thread _receiveThread;
+
+        // Battle routing: endpoint -> battlePlayerId
+        private readonly ConcurrentDictionary<string, int> _endpointToBattlePlayerId = new ConcurrentDictionary<string, int>();
+        // Battle routing: battlePlayerId -> (battleId, endpoint)
+        private readonly ConcurrentDictionary<int, (int battleId, string endpoint)> _battlePlayerRouting = new ConcurrentDictionary<int, (int, string)>();
+
+        // Battle rooms
+        private readonly ConcurrentDictionary<int, BattleRoom> _battleRooms = new ConcurrentDictionary<int, BattleRoom>();
+
+        // RTT tracking per player (smoothed, in seconds)
+        private readonly ConcurrentDictionary<int, float> _playerRtt = new ConcurrentDictionary<int, float>();
+        // Track last ping send time per player (in ms)
+        private readonly ConcurrentDictionary<int, long> _pendingPings = new ConcurrentDictionary<int, long>();
+
+        // Network simulation
+        private NetSimulator _netSim;
+
+        // Events
+        public event Action<int, IPEndPoint, MainPack> OnPacketReceived;
+
+        public BattleUdpServer(int port = 7777)
+        {
+            _port = port;
+        }
+
+        public void Start()
+        {
+            _udp = new UdpClient(_port);
+            _running = true;
+
+            _receiveThread = new Thread(ReceiveLoop)
+            {
+                IsBackground = true,
+                Name = "BattleUdpServer_Receive"
+            };
+            _receiveThread.Start();
+
+            Log($"BattleUdpServer started on port {_port}");
+        }
+
+        public void Stop()
+        {
+            _running = false;
+            _netSim?.Stop();
+            _udp?.Close();
+            Log("BattleUdpServer stopped");
+        }
+
+        /// <summary>
+        /// Configure network simulation for weak network testing.
+        /// </summary>
+        public void ConfigureNetSim(float dropRate, int delayMinMs, int delayMaxMs)
+        {
+            if (_netSim == null)
+            {
+                _netSim = new NetSimulator((data, len, ep) =>
+                {
+                    try { _udp.Send(data, len, ep); } catch { }
+                });
+            }
+            _netSim.Start(dropRate, delayMinMs, delayMaxMs);
+        }
+
+        /// <summary>
+        /// Register a battle room.
+        /// </summary>
+        public void RegisterBattle(BattleRoom room)
+        {
+            _battleRooms[room.BattleId] = room;
+
+            // Set up callbacks
+            room.OnSendPacket += (endpoint, pack) =>
+            {
+                Send(pack, endpoint);
+            };
+
+            room.OnSendBattleStart += (battlePlayerId, endpoint) =>
+            {
+                var pack = new MainPack
+                {
+                    RequestCode = RequestCode.Battle,
+                    ActionCode = ActionCode.BattleStart,
+                    Str = "1"
+                };
+                Send(pack, endpoint);
+            };
+
+            Log($"Registered battle {room.BattleId}");
+        }
+
+        /// <summary>
+        /// Unregister a battle room.
+        /// </summary>
+        public void UnregisterBattle(int battleId)
+        {
+            _battleRooms.TryRemove(battleId, out _);
+
+            // Clean up player routing for this battle
+            var toRemove = new List<int>();
+            foreach (var kvp in _battlePlayerRouting)
+            {
+                if (kvp.Value.battleId == battleId)
+                    toRemove.Add(kvp.Key);
+            }
+            foreach (var bpId in toRemove)
+            {
+                UnregisterPlayer(bpId);
+            }
+
+            Log($"Unregistered battle {battleId}");
+        }
+
+        /// <summary>
+        /// Register a player's endpoint for routing.
+        /// </summary>
+        public void RegisterPlayer(int battleId, int battlePlayerId, IPEndPoint endpoint)
+        {
+            string endpointStr = endpoint.ToString();
+            _endpointToBattlePlayerId[endpointStr] = battlePlayerId;
+            _battlePlayerRouting[battlePlayerId] = (battleId, endpointStr);
+            Log($"Registered player {battlePlayerId} from {endpointStr} in battle {battleId}");
+        }
+
+        /// <summary>
+        /// Unregister a player.
+        /// </summary>
+        public void UnregisterPlayer(int battlePlayerId)
+        {
+            if (_battlePlayerRouting.TryRemove(battlePlayerId, out var routing))
+            {
+                _endpointToBattlePlayerId.TryRemove(routing.endpoint, out _);
+            }
+        }
+
+        private void ReceiveLoop()
+        {
+            while (_running)
+            {
+                try
+                {
+                    IPEndPoint remote = null;
+                    byte[] data = _udp.Receive(ref remote);
+
+                    if (data.Length < 1) continue;
+
+                    var pack = ProtobufSerializer.DeserializeMainPack(data);
+
+                    // ── NetSim Uplink interception (参考 HYLD LZJUDP.RecvThread) ──
+                    if (_netSim != null && _netSim.Enabled)
+                    {
+                        var strategy = GetPacketStrategy(pack);
+                        var capturedPack = pack;
+                        var capturedRemote = remote;
+                        if (_netSim.ShouldDelayOrDrop(strategy, isUplink: true,
+                            onDelayed: () => HandlePacket(capturedPack, capturedRemote),
+                            onDropped: () => { /* silently dropped */ }))
+                        {
+                            continue; // 被 NetSim 拦截 (延迟或丢弃)
+                        }
+                    }
+
+                    HandlePacket(pack, remote);
+                }
+                catch (Exception ex) when (_running)
+                {
+                    Log($"Receive error: {ex.Message}");
+                }
+            }
+        }
+
+        private void HandlePacket(MainPack pack, IPEndPoint remote)
+        {
+            string endpointStr = remote.ToString();
+
+            switch (pack.ActionCode)
+            {
+                case ActionCode.BattleReady:
+                    HandleBattleReady(pack, remote);
+                    break;
+
+                case ActionCode.BattleOperation:
+                    HandleBattleOperation(pack, remote);
+                    break;
+
+                case ActionCode.Ping:
+                    HandlePing(pack, remote);
+                    break;
+
+                case ActionCode.Disconnect:
+                    HandleDisconnect(pack, remote);
+                    break;
+
+                case ActionCode.GameOver:
+                    // Client confirms game over
+                    break;
+            }
+
+            OnPacketReceived?.Invoke(_endpointToBattlePlayerId.GetValueOrDefault(endpointStr, -1), remote, pack);
+        }
+
+        private void HandleBattleReady(MainPack pack, IPEndPoint remote)
+        {
+            if (pack.BattleInfo == null) return;
+
+            int battleId = pack.BattleInfo.BattleId;
+            int battlePlayerId = pack.BattleInfo.OperationId; // Reusing field
+
+            // Register routing
+            RegisterPlayer(battleId, battlePlayerId, remote);
+
+            // Forward to battle room
+            if (_battleRooms.TryGetValue(battleId, out var room))
+            {
+                room.HandleBattleReady(battlePlayerId, remote.ToString());
+            }
+        }
+
+        private void HandleBattleOperation(MainPack pack, IPEndPoint remote)
+        {
+            if (pack.BattleInfo == null) return;
+
+            string endpointStr = remote.ToString();
+            if (!_endpointToBattlePlayerId.TryGetValue(endpointStr, out int battlePlayerId))
+                return;
+
+            if (!_battlePlayerRouting.TryGetValue(battlePlayerId, out var routing))
+                return;
+
+            if (_battleRooms.TryGetValue(routing.battleId, out var room))
+            {
+                var selfOp = pack.BattleInfo.SelfOperation;
+                if (selfOp != null)
+                {
+                    // 诊断：反序列化后立即打印原始值（前30帧每帧打印）
+                    int opId = pack.BattleInfo.OperationId;
+                    if (opId <= 30 || opId % 30 == 0)
+                    {
+                        Console.WriteLine($"[UDP-RAW] bp={battlePlayerId} tick={opId} MoveX={selfOp.MoveX:F6} MoveY={selfOp.MoveY:F6} AimYaw={selfOp.AimYaw:F6} Fire={selfOp.Fire} Jump={selfOp.Jump} Run={selfOp.Run} Aim={selfOp.Aim}");
+                    }
+
+                    room.HandlePlayerOperation(
+                        battlePlayerId,
+                        selfOp,
+                        pack.BattleInfo.OperationId,
+                        pack.BattleInfo.ClientAckedFrame
+                    );
+                }
+            }
+        }
+
+        private void HandlePing(MainPack pack, IPEndPoint remote)
+        {
+            string endpointStr = remote.ToString();
+            if (_endpointToBattlePlayerId.TryGetValue(endpointStr, out int battlePlayerId))
+            {
+                long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                long clientTime = pack.Timestamp;
+                long rttMs = now - clientTime;
+
+                // EWMA smoothing for RTT
+                float smoothedRtt;
+                if (_playerRtt.TryGetValue(battlePlayerId, out float oldRtt))
+                {
+                    smoothedRtt = 0.875f * oldRtt + 0.125f * (rttMs / 1000f);
+                }
+                else
+                {
+                    smoothedRtt = rttMs / 1000f;
+                }
+                _playerRtt[battlePlayerId] = smoothedRtt;
+            }
+
+            // Send Pong with echo timestamp
+            var pong = new MainPack
+            {
+                RequestCode = RequestCode.Battle,
+                ActionCode = ActionCode.Pong,
+                Timestamp = pack.Timestamp
+            };
+            Send(pong, endpointStr);
+        }
+
+        private void HandleDisconnect(MainPack pack, IPEndPoint remote)
+        {
+            string endpointStr = remote.ToString();
+            if (_endpointToBattlePlayerId.TryRemove(endpointStr, out int battlePlayerId))
+            {
+                if (_battlePlayerRouting.TryRemove(battlePlayerId, out var routing))
+                {
+                    if (_battleRooms.TryGetValue(routing.battleId, out var room))
+                    {
+                        // Room will handle disconnect
+                    }
+                }
+            }
+        }
+
+        public void Send(MainPack pack, string endpointStr)
+        {
+            if (!_running || string.IsNullOrEmpty(endpointStr)) return;
+
+            try
+            {
+                // Parse endpoint
+                var parts = endpointStr.Split(':');
+                if (parts.Length != 2) return;
+
+                string ip = parts[0];
+                if (!int.TryParse(parts[1], out int port)) return;
+
+                var endpoint = new IPEndPoint(IPAddress.Parse(ip), port);
+                Send(pack, endpoint);
+            }
+            catch (Exception ex)
+            {
+                Log($"Send error to {endpointStr}: {ex.Message}");
+            }
+        }
+
+        public void Send(MainPack pack, IPEndPoint endpoint)
+        {
+            if (!_running) return;
+
+            try
+            {
+                byte[] body = ProtobufSerializer.SerializeMainPack(pack);
+                if (_netSim != null && _netSim.Enabled)
+                {
+                    _netSim.ProcessOutgoing(body, body.Length, endpoint, GetPacketStrategy(pack));
+                }
+                else
+                {
+                    _udp.Send(body, body.Length, endpoint);
+                }
+            }
+            catch (Exception ex) when (_running)
+            {
+                Log($"Send error: {ex.Message}");
+            }
+        }
+
+        private static PacketStrategy GetPacketStrategy(MainPack pack)
+        {
+            switch (pack.ActionCode)
+            {
+                case ActionCode.BattleReady:
+                    return PacketStrategy.RouteSetup;
+                case ActionCode.Ping:
+                case ActionCode.Pong:
+                case ActionCode.BattleStart:
+                case ActionCode.GameOver:
+                    return PacketStrategy.Control;
+                default:
+                    return PacketStrategy.Data;
+            }
+        }
+
+        public void SendToBattle(int battleId, MainPack pack, int excludeBattlePlayerId = -1)
+        {
+            if (!_battleRooms.TryGetValue(battleId, out _)) return;
+
+            foreach (var kvp in _battlePlayerRouting.Values)
+            {
+                if (kvp.battleId == battleId)
+                {
+                    // Check exclude
+                    foreach (var routing in _battlePlayerRouting)
+                    {
+                        if (routing.Value.battleId == battleId && routing.Key != excludeBattlePlayerId)
+                        {
+                            Send(pack, routing.Value.endpoint);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Get RTT for a player (in milliseconds).
+        /// </summary>
+        public float GetPlayerRtt(int battlePlayerId)
+        {
+            if (_playerRtt.TryGetValue(battlePlayerId, out float rtt))
+            {
+                return rtt * 1000f; // Return in milliseconds
+            }
+            return 50f; // Default 50ms if not yet measured
+        }
+
+        /// <summary>
+        /// Get smoothed RTT in seconds (for lag compensation calculations).
+        /// </summary>
+        public float GetPlayerRttSeconds(int battlePlayerId)
+        {
+            if (_playerRtt.TryGetValue(battlePlayerId, out float rtt))
+            {
+                return rtt;
+            }
+            return 0.05f; // Default 50ms
+        }
+
+        private void Log(string message)
+        {
+            Console.WriteLine($"[BattleUdpServer] {DateTime.Now:HH:mm:ss.fff} {message}");
+        }
+    }
+}

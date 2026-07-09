@@ -1,0 +1,21 @@
+{
+    "name": "ShootingGame.Shared.ECS",
+    "rootNamespace": "ShootingGame.Shared.ECS",
+    "references": [
+        "ShootingGame.Network.Attributes",
+        "ShootingGame.Shared.Math",
+        "ShootingGame.Shared.Physics",
+        "ShootingGame.Shared.Simulation",
+        "ShootingGame.Shared.Ability",
+        "ShootingGame.Shared.GameplayTags",
+        "ShootingGame.Shared.Protocol"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

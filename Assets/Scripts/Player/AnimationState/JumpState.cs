@@ -1,32 +1,37 @@
-using System.Collections;
-using System.Collections.Generic;
-using UnityEngine;
 using Animancer;
+using UnityEngine;
+using InputFrame = ShootingGame.Shared.Simulation.InputFrame;
+
 
 public class JumpState : PlayerStateBase
 {
-    private AnimancerComponent _Animancer;
-    [SerializeField]
-    private ClipTransition _JumpAnimation;
+    private AnimancerComponent animancer;
+    private ClipTransition jumpClip;
 
-    public override void Init(IStateOwner owner)
+    public override void Init(PlayerModel model)
     {
-        base.Init(owner);
-        _Animancer = playerModel.animancer;
+        base.Init(model);
+        animancer = playerModel.animancer;
+        jumpClip = playerModel.AnimationSet.GetClip(PlayerAnimType.Rifle_FallingLoop);
     }
 
     public override void Enter()
     {
-        base.Enter();
-        _Animancer.Play(_JumpAnimation);
+        if (animancer == null || jumpClip == null)
+        {
+            Debug.LogError($"[JumpState] Cannot Enter: animancer or jumpClip is null");
+            return;
+        }
+        animancer.Play(jumpClip);
     }
 
-    public override void Update()
+    public override void Tick(InputFrame input, float dt)
     {
-        if (playerModel.gravityVector.y <= 0)
+        if (playerController == null) return;
+
+        if (playerController.IsGrounded)
         {
-            playerModel.ChangeAnimationState(PlayerAnimationState.fall);
+            playerModel.ChangeAnimationState(PlayerAnimationState.idle);
         }
     }
-    
 }

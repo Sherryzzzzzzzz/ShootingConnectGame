@@ -1,78 +1,83 @@
-using System.Collections;
-using System.Collections.Generic;
-using UnityEditor.Rendering;
 using UnityEngine;
+using InputFrame = ShootingGame.Shared.Simulation.InputFrame;
+
 
 public class PlayerAimState : PlayerStateBase
 {
     private float aimSpeed;
-    float speed = 0;
-
-    private float currentTilt = 0f;
 
     public override void Enter()
     {
         base.Enter();
         SetAimCamera();
-        playerModel.transform.rotation = Quaternion.Euler(0,Camera.main.transform.eulerAngles.y,0);
+
+        if (playerController != null && playerController.cam != null && playerModel != null)
+        {
+            playerModel.transform.rotation =
+                Quaternion.Euler(0, playerController.cam.transform.eulerAngles.y, 0);
+        }
     }
 
-    public override void Update()
+    public override void Tick(InputFrame input, float dt)
     {
-        base.Update();
-        Vector3 camForward = Camera.main.transform.forward;
-        camForward.y = 0f; // 忽略俯仰角
-        camForward.Normalize();
+        if (playerController == null) return;
 
-        Quaternion targetRotation = Quaternion.LookRotation(camForward, Vector3.up);
-        playerModel.transform.rotation = Quaternion.Lerp(
-            playerModel.transform.rotation,
-            targetRotation,
-            Time.deltaTime * 10f // 可调旋转平滑度
-        );
-
-        // === 正常移动逻辑 ===
-        if (playerController.running)
+        // === 始终朝摄像机方向对齐 ===
+        if (playerController.cam != null)
         {
-            aimSpeed = playerModel.runSpeed * playerController.movement.magnitude;
+            Vector3 camForward = playerController.cam.transform.forward;
+            camForward.y = 0f;
+            camForward.Normalize();
+
+            Quaternion targetRotation = Quaternion.LookRotation(camForward, Vector3.up);
+
+            playerModel.transform.rotation = Quaternion.Lerp(
+                playerModel.transform.rotation,
+                targetRotation,
+                dt * 10f
+            );
         }
+
+        // === 速度计算 ===
+        if (input.Run)
+            aimSpeed = playerModel.runSpeed * input.Movement.Magnitude;
         else
-        {
-            aimSpeed = playerModel.walkSpeed * playerController.movement.magnitude;
-        }
+            aimSpeed = playerModel.walkSpeed * input.Movement.Magnitude;
 
-        if (playerController.fire)
+        // === 开火 ===
+        if (input.Fire)
         {
             playerModel.Fire();
         }
-        
 
-        float accel = (playerController.movement.magnitude > 0.1f) ? 8f : 4f;
-        speed = Mathf.Lerp(speed, aimSpeed, Time.deltaTime * accel);
-        playerController.speed = speed;
-        
-        if (playerController.jump)
+        // === 跳跃 ===
+        if (input.Jump)
         {
-            playerModel.gravityVector.y = Mathf.Sqrt(playerModel.gravity * -2.0f * playerModel.jumpHeight);
+            playerModel.gravityVector.y =
+                Mathf.Sqrt(playerModel.gravity * -2.0f * playerModel.jumpHeight);
+
             playerModel.ChangePlayerState(PlayerState.sky);
+            return;
         }
 
-        if (!playerController.aim)
+        // === 退出瞄准 ===
+        if (!input.Aim)
         {
             playerModel.ChangePlayerState(PlayerState.ground);
         }
-        
     }
 
     public override void Exit()
     {
         base.Exit();
         SetNormalCamera();
-        playerModel.aimImage.color = Color.white;
+        if (playerModel != null && playerModel.aimImage != null)
+            playerModel.aimImage.color = Color.white;
     }
 
     private void SetNormalCamera()
     {
+        if (playerModel.normal == null || playerModel.aim == null) return;
         playerModel.normal.m_XAxis.Value = playerModel.aim.m_XAxis.Value;
         playerModel.normal.m_YAxis.Value = playerModel.aim.m_YAxis.Value;
         playerModel.normal.Priority = 100;
@@ -81,10 +86,10 @@ public class PlayerAimState : PlayerStateBase
 
     private void SetAimCamera()
     {
+        if (playerModel.normal == null || playerModel.aim == null) return;
         playerModel.aim.m_XAxis.Value = playerModel.normal.m_XAxis.Value;
         playerModel.aim.m_YAxis.Value = playerModel.normal.m_YAxis.Value;
         playerModel.aim.Priority = 100;
         playerModel.normal.Priority = 0;
     }
-    
 }

@@ -1,0 +1,17 @@
+{
+    "name": "ShootingGame.Shared.Simulation",
+    "rootNamespace": "ShootingGame.Shared.Simulation",
+    "references": [
+        "ShootingGame.Shared.Math",
+        "ShootingGame.Shared.Physics",
+        "ShootingGame.Shared.Ability"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

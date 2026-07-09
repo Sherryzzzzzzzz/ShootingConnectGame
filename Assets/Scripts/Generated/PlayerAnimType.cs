@@ -82,4 +82,6 @@ public enum PlayerAnimType
     Rifle_WalkFwdStart180_R,
     Rifle_WalkFwdStop_LU,
     Rifle_WalkFwdStop_RU,
+    // Death alias (maps to Rifle_Death_3)
+    Death = Rifle_Death_3,
 }
