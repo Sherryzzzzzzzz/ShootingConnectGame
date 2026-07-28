@@ -33,7 +33,7 @@ public partial class PlayerCombatBehaviour : NetworkBehaviour
         if (EntityManager.TryGetComponent<FireCooldownComponent>(Entity, out var cd))
         {
             if (cd.Cooldown > 0f) return;
-            cd.Cooldown = ShootingGame.Shared.Simulation.GameConstants.FireRate;
+            cd.Cooldown = cd.Rate > 0f ? cd.Rate : ShootingGame.Shared.Simulation.GameConstants.FireRate;
             EntityManager.SetComponent(Entity, cd);
         }
 

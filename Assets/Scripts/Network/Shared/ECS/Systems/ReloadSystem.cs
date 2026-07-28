@@ -22,7 +22,7 @@ namespace ShootingGame.Shared.ECS
                 reload.Timer -= dt;
                 if (reload.Timer <= 0f)
                 {
-                    ammo.Current = GameConstants.MaxAmmoPerClip;
+                    ammo.Current = ammo.Max;
                     reload.IsReloading = false;
                     reload.Timer = 0f;
                 }
@@ -30,7 +30,7 @@ namespace ShootingGame.Shared.ECS
             else if (input.Reload && !ammo.IsFull)
             {
                 reload.IsReloading = true;
-                reload.Timer = GameConstants.ReloadTime;
+                reload.Timer = reload.Duration > 0f ? reload.Duration : GameConstants.ReloadTime;
             }
 
             em.SetComponent(entity, reload);

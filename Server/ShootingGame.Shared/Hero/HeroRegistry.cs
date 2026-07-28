@@ -13,6 +13,23 @@ namespace ShootingGame.Shared.Hero
         public static void Initialize()
         {
             if (_initialized) return;
+            Initialize(null);
+        }
+
+        /// <summary>
+        /// 用外部加载的英雄配置初始化（生产路径：GameConfigLoader 从 heroes.json 读取）。
+        /// 传 null 则使用硬编码默认英雄（测试/兜底）。
+        /// </summary>
+        public static void Initialize(Dictionary<int, HeroConfig> configs)
+        {
+            if (_initialized) return;
+
+            if (configs != null && configs.Count > 0)
+            {
+                _heroes = configs;
+                _initialized = true;
+                return;
+            }
 
             _heroes = new Dictionary<int, HeroConfig>
             {

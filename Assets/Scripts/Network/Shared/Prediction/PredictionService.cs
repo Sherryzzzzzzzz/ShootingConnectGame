@@ -15,12 +15,23 @@ namespace ShootingGame.Shared.Prediction
     public class PredictionService
     {
         private readonly Dictionary<uint, PredictionContext> _pending = new Dictionary<uint, PredictionContext>();
-        private readonly PredictionContext _root = new PredictionContext(0, 0, null);
+
+        // Lazy-initialized: PredictionContext constructor calls Time.unscaledTime,
+        // which is not allowed during MonoBehaviour construction.
+        private PredictionContext _root;
 
         private uint _nextId = 1;
 
         /// <summary>Root node (id=0) for top-level predictions.</summary>
-        public PredictionContext Root => _root;
+        public PredictionContext Root
+        {
+            get
+            {
+                if (_root == null)
+                    _root = new PredictionContext(0, 0, null);
+                return _root;
+            }
+        }
 
         /// <summary>Number of active predictions.</summary>
         public int PendingCount => _pending.Count;
@@ -43,7 +54,7 @@ namespace ShootingGame.Shared.Prediction
             uint id = _nextId++;
             var context = new PredictionContext(id, parentId, undoAction, userData);
 
-            PredictionContext parent = parentId == 0 ? _root : _pending[parentId];
+            PredictionContext parent = parentId == 0 ? Root : _pending[parentId];
             parent.Children.Add(context);
 
             _pending[id] = context;
@@ -62,7 +73,7 @@ namespace ShootingGame.Shared.Prediction
             foreach (var child in context.Children)
             {
                 child.ParentId = 0;
-                _root.Children.Add(child);
+                Root.Children.Add(child);
             }
             context.Children.Clear();
 
@@ -79,7 +90,7 @@ namespace ShootingGame.Shared.Prediction
 
             // Detach from parent
             if (context.ParentId == 0)
-                _root.Children.Remove(context);
+                Root.Children.Remove(context);
             else if (_pending.TryGetValue(context.ParentId, out var parent))
                 parent.Children.Remove(context);
 
@@ -100,7 +111,7 @@ namespace ShootingGame.Shared.Prediction
                 ctx.Children.Clear();
             }
             _pending.Clear();
-            _root.Children.Clear();
+            Root.Children.Clear();
         }
 
         private void RemoveSubtree(PredictionContext node)

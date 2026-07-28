@@ -32,6 +32,11 @@ namespace ShootingGame.Server
         public List<SpawnPoint> SpawnPoints = new List<SpawnPoint>();
         public string CollisionDataPath;
 
+        // 对局模式
+        public int Mode;            // 0=团队歼灭 1=死斗(FFA)
+        public int KillTarget = 10; // 死斗：达到该击杀数获胜
+        public float TimeLimit = 300f; // 死斗：时间限制(秒)，到时按击杀数排名
+
         public int GetBattlePlayerId(int userId)
         {
             return UserIdToBattlePlayerId.TryGetValue(userId, out int bpId) ? bpId : -1;
@@ -48,6 +53,18 @@ namespace ShootingGame.Server
         private readonly object _lock = new object();
         private List<SpawnPoint> _spawnPoints;
         private string _collisionDataPath;
+
+        // 对局模式配置（由 Program.cs 注入）
+        private int _mode;            // 0=团队歼灭 1=死斗(FFA)
+        private int _killTarget = 10;
+        private float _timeLimit = 300f;
+
+        public void SetMatchMode(int mode, int killTarget, float timeLimit)
+        {
+            _mode = mode;
+            if (killTarget > 0) _killTarget = killTarget;
+            if (timeLimit > 0) _timeLimit = timeLimit;
+        }
 
         // Matching queue
         private readonly List<MatchUserInfo> _queue = new List<MatchUserInfo>();
@@ -265,7 +282,10 @@ namespace ShootingGame.Server
             {
                 BattleId = battleId,
                 RandSeed = new Random().Next(0, 10000),
-                CollisionDataPath = _collisionDataPath
+                CollisionDataPath = _collisionDataPath,
+                Mode = _mode,
+                KillTarget = _killTarget,
+                TimeLimit = _timeLimit
             };
 
             // Use configured spawn points or defaults
@@ -294,8 +314,8 @@ namespace ShootingGame.Server
             {
                 var player = players[i];
 
-                // Assign team ID if not set (alternating teams)
-                if (player.TeamId == 0)
+                // Assign team ID if not set (alternating teams; 死斗不分队保持 0)
+                if (player.TeamId == 0 && context.Mode == 0)
                 {
                     player.TeamId = (i % _teamsPerMatch) + 1;
                 }

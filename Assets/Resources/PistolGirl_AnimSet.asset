@@ -1,0 +1,348 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 68ef999e869447b4aa4be8f895567362, type: 3}
+  m_Name: PistolGirl_AnimSet
+  m_EditorClassIdentifier: 
+  animations:
+  - name: Rifle_Idle
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 8039006803641055762, guid: e4856eaa9c8db6c49a5fd23d11f41782,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_WalkFwdLoop
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 3669016403297415527, guid: 5437f0899fe22ae45a94d2c3d3e426db,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_WalkBwdLoop
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 3669016403297415527, guid: 5437f0899fe22ae45a94d2c3d3e426db,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_WalkLtLoop
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -6112040812507139710, guid: 13750004846aaaf449c333750deb31cd,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_WalkRtLoop
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -3466357855487707878, guid: dc2e382d9b035e049a17f0856cb10ed9,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_RunFwdLoop
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 3622946654251749395, guid: d5bc604a2ed9d19429298767c89cfac0,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_JumpUp
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -5132748838399913866, guid: c977054afbfd2ef44a435419709807f6,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_FallingLoop
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 8039006803641055762, guid: e4856eaa9c8db6c49a5fd23d11f41782,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_TurnL90
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -8632803276655351854, guid: e3d46f24e21e2b04d9ad494d8ad521c8,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_TurnR90
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 3434273004049835982, guid: 722762f0dd2414a4ab7b23a2d5504224,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_Death
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -6749239648525907536, guid: f17ff4be2fb56a14894ef5caf6d6f785,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_Hit1
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -6567080506290549673, guid: 9b4541654eec22443ba9e7d020741202,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_Hit2
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 8398098316805829179, guid: 808bf69b955c67745b3ba1a1cf13a19f,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_Evade
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -5132748838399913866, guid: c977054afbfd2ef44a435419709807f6,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_Stun
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 3088380389559057215, guid: ca418bd302eae634ea47a9a6492d7409,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_AimIdle
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -5516736278650128037, guid: 3da24022894f7df408671f0311f6ffc2,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_AimWalkF
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -1869307518110113224, guid: 4a10d307ba4693f49b70b7c0fba5637c,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_AimWalkL
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -6112040812507139710, guid: 13750004846aaaf449c333750deb31cd,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_AimWalkR
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -3466357855487707878, guid: dc2e382d9b035e049a17f0856cb10ed9,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_AimWalkB
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 5693151554263958995, guid: 06adc554392f572418fb7850a4110f48,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_AimJog
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 5901005103458171584, guid: 5a3352545a70c2940bbebb20d8c00f90,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_Shoot
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -5073010688122135267, guid: 75ab2b29c960c614da0d9c6c9f83dc21,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_CrouchIdle
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -5737363546681363055, guid: 27c12a4114d74814285470e7541319f2,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_CrouchWalk
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -7145457482725301136, guid: ff52149104c1a8f4cb12779039a1f935,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_CrouchJog
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: -5481488744261678803, guid: 32fb0a8bf48d11749ad14fb505f94569,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_CrouchAimIdle
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 2556189958885653831, guid: 2d963c891ce964a45942cdf8cb6daf1a,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_CrouchAimWalk
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 6146070396138037007, guid: ca52d52e061db8e4484fb76beb88c089,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_CrouchShoot
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 4435918552008027650, guid: 73e40c6e05799fa40bc607e5854dd6ff,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_DrawGun
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 2407882129380014940, guid: 14fd3c907c43b1f43b1fdb11bd72db5c,
+        type: 3}
+      _NormalizedStartTime: NaN
+  - name: Rifle_HolsterGun
+    clip:
+      _FadeDuration: 0.25
+      _Speed: 1
+      _Events:
+        _NormalizedTimes: []
+        _Callbacks: []
+        _Names: []
+      _Clip: {fileID: 4100706982401360426, guid: dcac11e6209018f45be54b69d2357058,
+        type: 3}
+      _NormalizedStartTime: NaN
+  references:
+    version: 2
+    RefIds: []

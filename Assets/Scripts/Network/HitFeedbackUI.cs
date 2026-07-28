@@ -24,6 +24,8 @@ public class HitFeedbackUI : MonoBehaviour
     [Header("Health Bar")]
     [SerializeField] private Color healthBarColor = Color.green;
     [SerializeField] private Color healthBarBgColor = new Color(0.2f, 0.2f, 0.2f, 0.8f);
+    [Tooltip("调试用 OnGUI 血条。正式 HUD 用 BattleUI 血条，默认关闭避免重叠")]
+    [SerializeField] private bool showHealthBar = false;
 
     // State
     private float _damageFlashTimer;
@@ -138,6 +140,9 @@ public class HitFeedbackUI : MonoBehaviour
         }
 
         // Health bar (bottom center)
+        // 默认关闭：BattleUI 已有正式 UGUI 血条，避免双血条重叠（调试时可重新打开）
+        if (showHealthBar)
+        {
         float barWidth = 200f;
         float barHeight = 16f;
         float barX = (Screen.width - barWidth) * 0.5f;
@@ -158,6 +163,7 @@ public class HitFeedbackUI : MonoBehaviour
         GUI.Label(new Rect(barX, barY, barWidth, barHeight),
                   $"  HP: {_localHealth}/100",
                   new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleLeft, fontSize = 12 });
+        }
     }
 
     private void DrawLine(float x1, float y1, float x2, float y2, float width)

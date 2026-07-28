@@ -7,7 +7,7 @@ using ShootingGame.Shared.Hero;
 
 /// <summary>
 /// 选角面板。匹配成功后显示，30 秒倒计时。
-/// 角色卡片从 HeroRegistry 动态生成。
+/// 角色卡片从 HeroRegistry 动态生成（从 Resources/Heroes/ 加载 HeroConfigSO）。
 /// </summary>
 public class HeroSelectPanel : MonoBehaviour
 {
@@ -21,6 +21,10 @@ public class HeroSelectPanel : MonoBehaviour
     [SerializeField] private GameObject _loadingOverlay;
     [SerializeField] private Color _selectedColor = Color.green;
     [SerializeField] private Color _normalColor = new Color(0.15f, 0.15f, 0.2f);
+
+    [Header("卡片布局")]
+    [SerializeField] private Vector2 _cardSize = new Vector2(180, 240);
+    [SerializeField] private Vector2 _iconSize = new Vector2(80, 80);
 
     [Header("设置")]
     [SerializeField] private float _selectTimeout = 30f;
@@ -51,12 +55,11 @@ public class HeroSelectPanel : MonoBehaviour
 
         var font = Resources.Load<TMP_FontAsset>("Fonts/NotoSansCJK-Black-7 SDF");
 
-        var heroes = new List<HeroConfig>();
-        // 遍历已知的英雄 ID
-        for (int id = 1; id <= 3; id++)
+        var heroes = HeroRegistry.GetAllHeroes();
+        if (heroes.Count == 0)
         {
-            var hero = HeroRegistry.GetHero(id);
-            if (hero != null) heroes.Add(hero);
+            Debug.LogWarning("[HeroSelectPanel] HeroRegistry 中没有英雄配置！");
+            return;
         }
 
         foreach (var hero in heroes)
@@ -70,22 +73,52 @@ public class HeroSelectPanel : MonoBehaviour
     {
         var card = new GameObject($"HeroCard_{hero.HeroId}");
         var rt = card.AddComponent<RectTransform>();
-        rt.sizeDelta = new Vector2(160, 180);
+        rt.sizeDelta = _cardSize;
 
         var img = card.AddComponent<Image>();
         img.color = _normalColor;
         _cardHighlights[hero.HeroId] = img;
 
         var layout = card.AddComponent<LayoutElement>();
-        layout.preferredWidth = 160;
-        layout.preferredHeight = 180;
+        layout.preferredWidth = _cardSize.x;
+        layout.preferredHeight = _cardSize.y;
 
         var vlg = card.AddComponent<VerticalLayoutGroup>();
         vlg.childAlignment = TextAnchor.UpperCenter;
-        vlg.spacing = 5;
-        vlg.padding = new RectOffset(8, 8, 12, 8);
+        vlg.spacing = 6;
+        vlg.padding = new RectOffset(10, 10, 14, 10);
 
-        // 名字
+        // --- 头像 ---
+        if (hero.HeroIcon != null)
+        {
+            var iconGo = new GameObject("Icon");
+            iconGo.transform.SetParent(card.transform, false);
+            var iconImg = iconGo.AddComponent<Image>();
+            iconImg.sprite = hero.HeroIcon;
+            iconImg.preserveAspect = true;
+            var iconRt = iconGo.GetComponent<RectTransform>();
+            iconRt.sizeDelta = _iconSize;
+
+            var iconLayout = iconGo.AddComponent<LayoutElement>();
+            iconLayout.preferredWidth = _iconSize.x;
+            iconLayout.preferredHeight = _iconSize.y;
+        }
+        else
+        {
+            // 无头像时显示占位色块
+            var placeholderGo = new GameObject("IconPlaceholder");
+            placeholderGo.transform.SetParent(card.transform, false);
+            var placeholderImg = placeholderGo.AddComponent<Image>();
+            placeholderImg.color = new Color(0.3f, 0.3f, 0.4f);
+            var placeholderRt = placeholderGo.GetComponent<RectTransform>();
+            placeholderRt.sizeDelta = _iconSize;
+
+            var placeholderLayout = placeholderGo.AddComponent<LayoutElement>();
+            placeholderLayout.preferredWidth = _iconSize.x;
+            placeholderLayout.preferredHeight = _iconSize.y;
+        }
+
+        // --- 名字 ---
         var nameGo = new GameObject("Name");
         nameGo.transform.SetParent(card.transform, false);
         var nameText = nameGo.AddComponent<TextMeshProUGUI>();
@@ -95,18 +128,28 @@ public class HeroSelectPanel : MonoBehaviour
         nameText.color = Color.white;
         if (font != null) nameText.font = font;
 
-        // 描述
+        // --- 描述（HP + 枪械） ---
         var gunName = hero.StartingGun != null ? hero.StartingGun.GunName : "无";
         var descGo = new GameObject("Desc");
         descGo.transform.SetParent(card.transform, false);
         var descText = descGo.AddComponent<TextMeshProUGUI>();
-        descText.text = $"HP:{hero.MaxHP} | {gunName}";
+        descText.text = $"HP: {hero.MaxHP}\n{gunName}";
         descText.fontSize = 13;
         descText.alignment = TextAlignmentOptions.Center;
         descText.color = new Color(0.7f, 0.7f, 0.7f);
         if (font != null) descText.font = font;
 
-        // 按钮
+        // --- 速度 ---
+        var speedGo = new GameObject("Speed");
+        speedGo.transform.SetParent(card.transform, false);
+        var speedText = speedGo.AddComponent<TextMeshProUGUI>();
+        speedText.text = $"速度: {hero.MoveSpeed:F1}";
+        speedText.fontSize = 11;
+        speedText.alignment = TextAlignmentOptions.Center;
+        speedText.color = new Color(0.5f, 0.5f, 0.6f);
+        if (font != null) speedText.font = font;
+
+        // --- 按钮 ---
         var btn = card.AddComponent<Button>();
         var heroId = hero.HeroId;
         btn.onClick.AddListener(() => SelectHero(heroId));
@@ -153,7 +196,7 @@ public class HeroSelectPanel : MonoBehaviour
         if (_timer <= 0f)
         {
             _timer = 0f;
-            if (_selectedHeroId < 0) SelectHero(1);
+            if (_selectedHeroId < 0) SelectHero(HeroRegistry.DefaultHeroId);
             ConfirmSelection();
         }
         if (_timerText != null) _timerText.text = $"{_timer:F0}";

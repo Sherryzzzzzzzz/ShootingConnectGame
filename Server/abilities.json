@@ -1,0 +1,13 @@
+{
+  "Abilities": [
+    { "AssetId": 1, "Name": "Fire", "Cooldown": 0.15, "Duration": 0.0, "RequiredTags": 0, "BlockedByTags": 0, "CancelledByTags": 0, "AppliedTags": 0, "RemovedTags": 0, "BehaviorTypeName": "ShootingGame.Shared.Ability.Abilities.FireWeaponAbility" },
+    { "AssetId": 2, "Name": "Reload", "Cooldown": 0.0, "Duration": 2.0, "RequiredTags": 0, "BlockedByTags": 0, "CancelledByTags": 0, "AppliedTags": 0, "RemovedTags": 0, "BehaviorTypeName": "ShootingGame.Shared.Ability.Abilities.ReloadWeaponAbility" },
+    { "AssetId": 3, "Name": "Jump", "Cooldown": 0.0, "Duration": 0.0, "RequiredTags": 0, "BlockedByTags": 0, "CancelledByTags": 0, "AppliedTags": 0, "RemovedTags": 0, "BehaviorTypeName": "ShootingGame.Shared.Ability.Abilities.JumpAbility" },
+    { "AssetId": 4, "Name": "Sprint", "Cooldown": 0.0, "Duration": 0.0, "RequiredTags": 0, "BlockedByTags": 0, "CancelledByTags": 0, "AppliedTags": 0, "RemovedTags": 0, "BehaviorTypeName": "ShootingGame.Shared.Ability.Abilities.SprintAbility" },
+    { "AssetId": 11, "Name": "Dash", "Cooldown": 1.5, "Duration": 0.0, "RequiredTags": 0, "BlockedByTags": 0, "CancelledByTags": 0, "AppliedTags": 0, "RemovedTags": 0, "BehaviorTypeName": "ShootingGame.Shared.Ability.Abilities.DashAbility" },
+    { "AssetId": 20, "Name": "Shield", "Cooldown": 8.0, "Duration": 3.0, "RequiredTags": 0, "BlockedByTags": 0, "CancelledByTags": 0, "AppliedTags": 0, "RemovedTags": 0, "BehaviorTypeName": "ShootingGame.Shared.Ability.Abilities.ShieldAbility" },
+    { "AssetId": 21, "Name": "Charge", "Cooldown": 6.0, "Duration": 0.3, "RequiredTags": 0, "BlockedByTags": 0, "CancelledByTags": 0, "AppliedTags": 0, "RemovedTags": 0, "BehaviorTypeName": "ShootingGame.Shared.Ability.Abilities.ChargeAbility" },
+    { "AssetId": 30, "Name": "Stealth", "Cooldown": 12.0, "Duration": 5.0, "RequiredTags": 0, "BlockedByTags": 0, "CancelledByTags": 0, "AppliedTags": 0, "RemovedTags": 0, "BehaviorTypeName": "ShootingGame.Shared.Ability.Abilities.StealthAbility" },
+    { "AssetId": 31, "Name": "MarkShot", "Cooldown": 10.0, "Duration": 0.0, "RequiredTags": 0, "BlockedByTags": 0, "CancelledByTags": 0, "AppliedTags": 0, "RemovedTags": 0, "BehaviorTypeName": "ShootingGame.Shared.Ability.Abilities.MarkShotAbility" }
+  ]
+}

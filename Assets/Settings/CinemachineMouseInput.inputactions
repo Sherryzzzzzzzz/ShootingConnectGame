@@ -1,0 +1,35 @@
+{
+    "version": 1,
+    "name": "CinemachineMouseInput",
+    "maps": [
+        {
+            "name": "Player",
+            "id": "fb632b92-f937-449f-9522-02259c12e4c7",
+            "actions": [
+                {
+                    "name": "Look",
+                    "type": "Value",
+                    "id": "b604dfbf-5dc7-42f7-a5d0-9779629f3434",
+                    "expectedControlType": "",
+                    "processors": "",
+                    "interactions": "",
+                    "initialStateCheck": true
+                }
+            ],
+            "bindings": [
+                {
+                    "name": "",
+                    "id": "0836c9d4-1cef-41ec-89ce-1e49784cc3ac",
+                    "path": "<Mouse>/delta",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "Look",
+                    "isComposite": false,
+                    "isPartOfComposite": false
+                }
+            ]
+        }
+    ],
+    "controlSchemes": []
+}

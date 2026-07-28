@@ -26,6 +26,11 @@ namespace ShootingGame.Shared.Simulation
         public bool IsReloading;
         public float ReloadTimer;
 
+        // Weapon（由英雄枪械配置注入，默认值与 GameConstants 历史行为一致）
+        public int MaxAmmo;         // 弹夹容量
+        public float ReloadDuration; // 换弹时长(秒)
+        public float FireInterval;   // 射击间隔(秒)
+
         // Tags
         public long TagBitmask;
 
@@ -48,7 +53,10 @@ namespace ShootingGame.Shared.Simulation
                 Health = GameConstants.MaxHealth,
                 CurrentAmmo = GameConstants.MaxAmmoPerClip,
                 IsReloading = false,
-                ReloadTimer = 0f
+                ReloadTimer = 0f,
+                MaxAmmo = GameConstants.MaxAmmoPerClip,
+                ReloadDuration = GameConstants.ReloadTime,
+                FireInterval = GameConstants.FireRate
             };
         }
     }

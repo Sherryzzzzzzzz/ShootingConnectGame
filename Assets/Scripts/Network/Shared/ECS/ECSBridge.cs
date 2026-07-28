@@ -20,10 +20,10 @@ namespace ShootingGame.Shared.ECS
             em.AddComponent(entity, new TransformComponent(snap.Position, snap.Rotation));
             em.AddComponent(entity, new MovementComponent(snap.Velocity, snap.VerticalVelocity, snap.IsGrounded));
             em.AddComponent(entity, new PlayerStateComponent(snap.State));
-            em.AddComponent(entity, new FireCooldownComponent(snap.FireCooldown));
+            em.AddComponent(entity, new FireCooldownComponent(snap.FireCooldown, snap.FireInterval));
             em.AddComponent(entity, new HealthComponent(snap.Health, GameConstants.MaxHealth));
-            em.AddComponent(entity, new AmmoComponent(snap.CurrentAmmo, GameConstants.MaxAmmoPerClip));
-            em.AddComponent(entity, new ReloadComponent(snap.IsReloading, snap.ReloadTimer));
+            em.AddComponent(entity, new AmmoComponent(snap.CurrentAmmo, snap.MaxAmmo));
+            em.AddComponent(entity, new ReloadComponent(snap.IsReloading, snap.ReloadTimer, snap.ReloadDuration));
             em.AddComponent(entity, new TagComponent(new TagContainer { EffectiveMask = snap.TagBitmask }));
             em.AddComponent(entity, new InputComponent { Tick = snap.Tick });
 
@@ -121,16 +121,16 @@ namespace ShootingGame.Shared.ECS
                 em.SetComponent(entity, new PlayerStateComponent(snap.State));
 
             if (em.TryGetComponent<FireCooldownComponent>(entity, out _))
-                em.SetComponent(entity, new FireCooldownComponent(snap.FireCooldown));
+                em.SetComponent(entity, new FireCooldownComponent(snap.FireCooldown, snap.FireInterval));
 
             if (em.TryGetComponent<HealthComponent>(entity, out _))
                 em.SetComponent(entity, new HealthComponent(snap.Health, GameConstants.MaxHealth));
 
             if (em.TryGetComponent<AmmoComponent>(entity, out _))
-                em.SetComponent(entity, new AmmoComponent(snap.CurrentAmmo, GameConstants.MaxAmmoPerClip));
+                em.SetComponent(entity, new AmmoComponent(snap.CurrentAmmo, snap.MaxAmmo));
 
             if (em.TryGetComponent<ReloadComponent>(entity, out _))
-                em.SetComponent(entity, new ReloadComponent(snap.IsReloading, snap.ReloadTimer));
+                em.SetComponent(entity, new ReloadComponent(snap.IsReloading, snap.ReloadTimer, snap.ReloadDuration));
 
             if (em.TryGetComponent<TagComponent>(entity, out _))
                 em.SetComponent(entity, new TagComponent(new TagContainer { EffectiveMask = snap.TagBitmask }));

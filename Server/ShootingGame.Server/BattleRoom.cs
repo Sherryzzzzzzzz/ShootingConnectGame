@@ -41,6 +41,11 @@ namespace ShootingGame.Server
         private readonly Dictionary<int, int> _playerHp = new Dictionary<int, int>();
         private readonly Dictionary<int, bool> _playerIsDead = new Dictionary<int, bool>();
         private readonly Dictionary<int, HeroConfig> _playerHeroConfigs = new Dictionary<int, HeroConfig>();
+        private readonly Dictionary<int, GunConfigData> _playerGuns = new Dictionary<int, GunConfigData>();
+        private readonly Dictionary<int, int> _lastFireFrame = new Dictionary<int, int>();
+        private readonly Dictionary<int, float> _bloomHeat = new Dictionary<int, float>(); // 连发扩散热度(度)
+        private readonly Dictionary<int, bool> _playerIsAiming = new Dictionary<int, bool>();
+        private readonly Dictionary<int, bool> _playerIsCrouching = new Dictionary<int, bool>();
 
         // Input buffers (sliding window)
         private readonly Dictionary<int, InputBuffer> _inputBuffers = new Dictionary<int, InputBuffer>();
@@ -69,8 +74,17 @@ namespace ShootingGame.Server
         private int _killerTeamId;
         private int _killerPlayerId;
 
+        // 死斗(FFA)模式状态
+        private bool IsDeathmatch => Context.Mode == 1;
+        private readonly Dictionary<int, int> _kills = new Dictionary<int, int>();
+        private readonly Dictionary<int, int> _deaths = new Dictionary<int, int>();
+        private float _matchElapsed;
+        private readonly Random _spawnRng = new Random();
+
         // Respawn system
         private readonly Dictionary<int, float> _respawnTimers = new Dictionary<int, float>();
+        private readonly Dictionary<int, Vec3> _spawnPositions = new Dictionary<int, Vec3>();  // 记录出生位置，用于卡点检测
+        private readonly Dictionary<int, int> _stuckTicks = new Dictionary<int, int>();          // 持续未移动的 tick 数
         private List<SpawnPoint> _team1SpawnPoints;
         private List<SpawnPoint> _team2SpawnPoints;
         private List<SpawnPoint> _anySpawnPoints;
@@ -165,9 +179,6 @@ namespace ShootingGame.Server
                     }
                 }
 
-                int team1Idx = 0, team2Idx = 0, anyIdx = 0;
-                int defaultIdx = 0;
-
                 // Initialize player state
                 foreach (var player in Context.Players)
                 {
@@ -177,44 +188,50 @@ namespace ShootingGame.Server
                     var heroConfig = HeroRegistry.GetHero(player.HeroId);
                     if (heroConfig == null) heroConfig = HeroRegistry.GetHero(HeroRegistry.DefaultHeroId);
                     _playerHeroConfigs[bpId] = heroConfig;
+                    _playerGuns[bpId] = heroConfig.Gun ?? GunRegistry.GetGun(heroConfig.StartingGunId);
+                    _kills[bpId] = 0;
+                    _deaths[bpId] = 0;
+                    _bloomHeat[bpId] = 0f;
 
                     _playerReady[bpId] = false;
                     _playerTeams[bpId] = player.TeamId;
                     _playerHp[bpId] = heroConfig.MaxHP;
                     _playerIsDead[bpId] = false;
 
-                    // Resolve spawn position: team-specific > any-team > defaults
+                    // 出生点随机选择（每次出生不同位置）
                     Vec3 spawnPos;
-                    if (player.TeamId == 1 && _team1SpawnPoints.Count > 0)
+                    if (!IsDeathmatch && player.TeamId == 1 && _team1SpawnPoints.Count > 0)
                     {
-                        var sp = _team1SpawnPoints[team1Idx % _team1SpawnPoints.Count];
-                        spawnPos = sp.Position;
-                        team1Idx++;
+                        int idx = _spawnRng.Next(_team1SpawnPoints.Count);
+                        spawnPos = _team1SpawnPoints[idx].Position;
+                        Console.WriteLine($"[Spawn] bp{bpId} Team1 pool idx={idx}/{_team1SpawnPoints.Count} pos=({spawnPos.x:F1},{spawnPos.z:F1})");
                     }
-                    else if (player.TeamId == 2 && _team2SpawnPoints.Count > 0)
+                    else if (!IsDeathmatch && player.TeamId == 2 && _team2SpawnPoints.Count > 0)
                     {
-                        var sp = _team2SpawnPoints[team2Idx % _team2SpawnPoints.Count];
-                        spawnPos = sp.Position;
-                        team2Idx++;
+                        int idx = _spawnRng.Next(_team2SpawnPoints.Count);
+                        spawnPos = _team2SpawnPoints[idx].Position;
+                        Console.WriteLine($"[Spawn] bp{bpId} Team2 pool idx={idx}/{_team2SpawnPoints.Count} pos=({spawnPos.x:F1},{spawnPos.z:F1})");
                     }
                     else if (_anySpawnPoints.Count > 0)
                     {
-                        var sp = _anySpawnPoints[anyIdx % _anySpawnPoints.Count];
-                        spawnPos = sp.Position;
-                        anyIdx++;
+                        int idx = _spawnRng.Next(_anySpawnPoints.Count);
+                        spawnPos = _anySpawnPoints[idx].Position;
+                        Console.WriteLine($"[Spawn] bp{bpId} Any pool idx={idx}/{_anySpawnPoints.Count} pos=({spawnPos.x:F1},{spawnPos.z:F1})");
                     }
                     else
                     {
-                        spawnPos = defaultIdx < DefaultSpawnPositions.Length
-                            ? DefaultSpawnPositions[defaultIdx]
-                            : new Vec3(defaultIdx * 2, 0, 0);
+                        int idx = _spawnRng.Next(DefaultSpawnPositions.Length);
+                        spawnPos = DefaultSpawnPositions[idx];
+                        Console.WriteLine($"[Spawn] bp{bpId} Defaults idx={idx}");
                     }
-                    defaultIdx++;
 
                     _playerSnapshots[bpId] = PlayerSnapshot.Default(spawnPos);
                     var snap = _playerSnapshots[bpId];
                     snap.Health = heroConfig.MaxHP;
+                    ApplyGunToSnapshot(ref snap, _playerGuns.GetValueOrDefault(bpId));
                     _playerSnapshots[bpId] = snap;
+                    _spawnPositions[bpId] = spawnPos;
+                    _stuckTicks[bpId] = 0;
 
                     // Initialize input buffer
                     _inputBuffers[bpId] = new InputBuffer();
@@ -322,7 +339,8 @@ namespace ShootingGame.Server
                         Jump = jumpEdge,
                         Run = operation.Run,
                         Aim = operation.Aim,
-                        Reload = operation.Reload
+                        Reload = operation.Reload,
+                        Crouch = operation.Crouch
                     };
                     inputBuffer.Store(input);
 
@@ -516,7 +534,7 @@ namespace ShootingGame.Server
                         bool shouldEnd = false;
                         lock (_lock)
                         {
-                            if (IsTeamEliminated())
+                            if (IsDeathmatch ? CheckDeathmatchEnd() : IsTeamEliminated())
                             {
                                 shouldEnd = true;
                             }
@@ -553,6 +571,9 @@ namespace ShootingGame.Server
             // 0. Process respawns
             ProcessRespawns();
 
+            // 0.5. 连发扩散热度衰减
+            DecayBloomHeat();
+
             // 1. Process inputs and update positions
             foreach (var kvp in _playerSnapshots)
             {
@@ -563,6 +584,8 @@ namespace ShootingGame.Server
                 var snapshot = kvp.Value;
                 var inputBuffer = _inputBuffers[bpId];
                 var input = inputBuffer.Get(_frameId);
+                _playerIsAiming[bpId] = input.Aim;
+                _playerIsCrouching[bpId] = input.Crouch;
 
                 // Update from input
                 var op = new PlayerOperation
@@ -594,6 +617,25 @@ namespace ShootingGame.Server
                     snapshot = PlayerSimulation.Simulate(snapshot, input, _frameInterval, _collisionWorld);
                 }
                 _playerSnapshots[bpId] = snapshot;
+
+                // 卡点检测：出生后 180 ticks(3秒) 内移动 <0.5m → 自动重新复活
+                if (_spawnPositions.TryGetValue(bpId, out var sp))
+                {
+                    float distFromSpawn = Vec3.Distance(snapshot.Position, sp);
+                    if (distFromSpawn < 0.5f && snapshot.Health > 0 && !_playerIsDead[bpId])
+                    {
+                        _stuckTicks[bpId] = _stuckTicks.GetValueOrDefault(bpId) + 1;
+                        if (_stuckTicks[bpId] >= 180)
+                        {
+                            Log($"[Stuck] bp{bpId} 出生后 3s 未移动 {distFromSpawn:F2}m，强制重新复活");
+                            RespawnPlayer(bpId);
+                        }
+                    }
+                    else
+                    {
+                        _stuckTicks[bpId] = 0; // 移动了，重置
+                    }
+                }
 
                 float rotAfter = snapshot.Rotation.EulerAngles.y;
                 if (_frameId <= 10 || _frameId % 60 == 0)
@@ -683,6 +725,34 @@ namespace ShootingGame.Server
             return _playerSnapshots.TryGetValue(bpId, out var snap) ? snap.Position : Vec3.Zero;
         }
 
+        /// <summary>把枪械参数注入玩家快照（弹药/换弹/射速）。</summary>
+        private static void ApplyGunToSnapshot(ref PlayerSnapshot snap, GunConfigData gun)
+        {
+            if (gun == null) return;
+            snap.MaxAmmo = gun.ClipSize;
+            snap.CurrentAmmo = gun.ClipSize;
+            snap.ReloadDuration = gun.ReloadTime;
+            snap.FireInterval = gun.FireRate;
+        }
+
+        private GunConfigData GetPlayerGun(int bpId)
+        {
+            return _playerGuns.TryGetValue(bpId, out var gun) ? gun : GunRegistry.GetGun(null);
+        }
+
+        /// <summary>连发扩散热度随时间恢复</summary>
+        private void DecayBloomHeat()
+        {
+            foreach (var kvp in _playerGuns)
+            {
+                var gun = kvp.Value;
+                if (gun == null || gun.BloomRecover <= 0f) continue;
+                float heat = _bloomHeat.GetValueOrDefault(kvp.Key);
+                if (heat > 0f)
+                    _bloomHeat[kvp.Key] = Math.Max(0f, heat - gun.BloomRecover * _frameInterval);
+            }
+        }
+
         private void SpawnBullets(AllPlayerOperation frameOp)
         {
             foreach (var op in frameOp.Operations)
@@ -699,12 +769,30 @@ namespace ShootingGame.Server
                     continue;
 
                 int teamId = _playerTeams.GetValueOrDefault(bpId, 0);
+                var gun = GetPlayerGun(bpId);
+                float bulletSpeed = gun != null ? gun.BulletSpeed : 100f;
+                float maxRange = gun != null ? gun.Range : 200f;
 
                 foreach (var atk in op.AttackOperations)
                 {
-                    int clientFrame = atk.ClientFrameId;
+                    int originalClientFrame = atk.ClientFrameId; // 保留原始客户端帧号用于射速检查
+
+                    int clientFrame = originalClientFrame;
                     if (clientFrame > _frameId)
                         clientFrame = _frameId;
+
+                    // 服务端射速校验（用原始客户端帧号，不受 _frameId 截断影响；
+                    // 否则服务器 tick 慢于客户端时两次攻击被截成同一帧，差=0→永远拒绝）
+                    if (gun != null && _lastFireFrame.TryGetValue(bpId, out int lastFire))
+                    {
+                        float interval = (originalClientFrame - lastFire) * _frameInterval;
+                        if (interval < gun.FireRate * 0.5f)
+                        {
+                            Log($"[AntiCheat] bp{bpId} 射速过快: {interval:F3}s < {gun.FireRate * 0.5f:F3}s, 丢弃攻击");
+                            continue;
+                        }
+                    }
+                    _lastFireFrame[bpId] = originalClientFrame;
 
                     // 优先使用客户端发送的枪口位置（非零表示客户端已设置）
                     Vec3 spawnPos;
@@ -728,7 +816,15 @@ namespace ShootingGame.Server
                     Vec3 dir = aimRot * Vec3.Forward;
                     dir = dir.Normalized;
 
-                    float bulletSpeed = 100f;
+                    // 扩散：基础散射 + 移动惩罚 + 连发 bloom（双端同种子，客户端视觉弹道一致）
+                    if (gun != null)
+                    {
+                        bool isMoving = new Vec3(snapshot.Velocity.x, 0f, snapshot.Velocity.z).SqrMagnitude > 1f;
+                        float heat = _bloomHeat.GetValueOrDefault(bpId);
+                        float spreadDeg = SpreadUtility.ComputeTotalSpread(gun, isMoving, heat);
+                        dir = SpreadUtility.ApplyConeSpread(dir, spreadDeg, SpreadUtility.MakeSeed(atk.AttackId, bpId));
+                        _bloomHeat[bpId] = Math.Min(heat + gun.BloomPerShot, gun.BloomMax > 0f ? gun.BloomMax : heat + gun.BloomPerShot);
+                    }
 
                     // Lag compensation: frame-by-frame catchup with collision detection
                     int catchupFrames = _frameId - clientFrame;
@@ -754,7 +850,7 @@ namespace ShootingGame.Server
                         framesSimulated++;
 
                         // Check max distance
-                        if (traveledDistance >= 200f)
+                        if (traveledDistance >= maxRange)
                             break;
 
                         // Check world collision during catchup (bullet vs obstacles)
@@ -767,7 +863,7 @@ namespace ShootingGame.Server
                         {
                             int targetId = targetKvp.Key;
                             if (targetId == bpId) continue;
-                            if (_playerTeams.TryGetValue(targetId, out int targetTeam) && targetTeam == teamId) continue;
+                            if (!IsDeathmatch && _playerTeams.TryGetValue(targetId, out int targetTeam) && targetTeam == teamId) continue;
                             if (_playerIsDead.GetValueOrDefault(targetId, false)) continue;
                             if (_disconnectedPlayers.Contains(targetId)) continue;
 
@@ -787,8 +883,11 @@ namespace ShootingGame.Server
                             var hitCapsule = new Capsule(targetPos - new Vec3(0, GameConstants.FootCapsuleOffset, 0), GameConstants.PlayerHeight + GameConstants.FootCapsuleOffset, GameConstants.HitCapsuleRadius);
                             if (Intersection.SweepBulletHitCapsule(prevPos, currentPos, hitCapsule, GameConstants.BulletRadius))
                             {
-                                // Hit during catchup! Calculate body-part damage
-                                int damage = CalculateBodyPartDamage(GameConstants.HitscanDamage, currentPos, targetPos);
+                                // Hit during catchup! Calculate body-part damage (枪械伤害 × 距离衰减 × 部位倍率)
+                                int baseDamage = gun != null
+                                    ? (int)(gun.Damage * gun.GetFalloffMultiplier(traveledDistance) + 0.5f)
+                                    : GameConstants.HitscanDamage;
+                                int damage = CalculateBodyPartDamage(baseDamage, currentPos, targetPos, out int bodyPart);
                                 damage = ApplyTagDamageModifiers(damage, bpId, targetId);
                                 int hp = _playerHp[targetId] - damage;
                                 hp = Math.Max(0, hp);
@@ -801,7 +900,9 @@ namespace ShootingGame.Server
                                     _respawnTimers[targetId] = GameConstants.RespawnDelay;
                                     _killerPlayerId = bpId;
                                     _killerTeamId = teamId;
-                                    Log($"Player {targetId} killed. Respawning in {GameConstants.RespawnDelay}s");
+                                    _kills[bpId] = _kills.GetValueOrDefault(bpId) + 1;
+                                    _deaths[targetId] = _deaths.GetValueOrDefault(targetId) + 1;
+                                    Log($"Player {targetId} killed by {bpId} (K:{_kills[bpId]}). Respawning in {GameConstants.RespawnDelay}s");
                                 }
 
                                 _pendingHitEvents.Add(new HitEventMsg
@@ -812,7 +913,8 @@ namespace ShootingGame.Server
                                     Damage = damage,
                                     IsKill = isKill,
                                     HitPoint = currentPos,
-                                    HitFrameId = _frameId
+                                    HitFrameId = _frameId,
+                                    BodyPart = bodyPart
                                 });
 
                                 Log($"[Hit-Catchup] bp{bpId} hit bp{targetId} for {damage} damage (kill={isKill}) frameDiff={catchupFrames}");
@@ -825,7 +927,7 @@ namespace ShootingGame.Server
                             break;
                     }
 
-                    if (!hitDuringCatchup && traveledDistance < 200f)
+                    if (!hitDuringCatchup && traveledDistance < maxRange)
                     {
                         var bullet = new ServerBullet
                         {
@@ -835,8 +937,9 @@ namespace ShootingGame.Server
                             Position = currentPos,
                             Direction = dir,
                             Speed = bulletSpeed,
-                            MaxDistance = 200f,
-                            Damage = GameConstants.HitscanDamage,
+                            MaxDistance = maxRange,
+                            Damage = gun != null ? gun.Damage : GameConstants.HitscanDamage,
+                            Gun = gun,
                             SpawnFrameId = clientFrame,
                             TraveledDistance = traveledDistance
                         };
@@ -882,10 +985,10 @@ namespace ShootingGame.Server
                     int targetId = kvp.Key;
                     var targetPos = kvp.Value.Position;
 
-                    // Skip self and teammates
+                    // Skip self and teammates (FFA 无队友，只跳过自己)
                     if (targetId == bullet.OwnerId)
                         continue;
-                    if (_playerTeams.TryGetValue(targetId, out int targetTeam) &&
+                    if (!IsDeathmatch && _playerTeams.TryGetValue(targetId, out int targetTeam) &&
                         targetTeam == bullet.OwnerTeamId)
                         continue;
 
@@ -900,8 +1003,11 @@ namespace ShootingGame.Server
                     var hitCapsule = new Capsule(targetPos - new Vec3(0, GameConstants.FootCapsuleOffset, 0), GameConstants.PlayerHeight + GameConstants.FootCapsuleOffset, GameConstants.HitCapsuleRadius);
                     if (Intersection.SweepBulletHitCapsule(prevPos, bullet.Position, hitCapsule, GameConstants.BulletRadius))
                     {
-                        // Hit! Calculate body-part damage
-                        int damage = CalculateBodyPartDamage(bullet.Damage, bullet.Position, targetPos);
+                        // Hit! Calculate body-part damage (含距离衰减)
+                        int bulletBaseDamage = bullet.Gun != null
+                            ? (int)(bullet.Gun.Damage * bullet.Gun.GetFalloffMultiplier(bullet.TraveledDistance) + 0.5f)
+                            : bullet.Damage;
+                        int damage = CalculateBodyPartDamage(bulletBaseDamage, bullet.Position, targetPos, out int bodyPart);
                         damage = ApplyTagDamageModifiers(damage, bullet.OwnerId, targetId);
                         int hp = _playerHp[targetId] - damage;
                         hp = Math.Max(0, hp);
@@ -914,7 +1020,9 @@ namespace ShootingGame.Server
                             _respawnTimers[targetId] = GameConstants.RespawnDelay;
                             _killerPlayerId = bullet.OwnerId;
                             _killerTeamId = bullet.OwnerTeamId;
-                            Log($"Player {targetId} killed. Respawning in {GameConstants.RespawnDelay}s");
+                            _kills[bullet.OwnerId] = _kills.GetValueOrDefault(bullet.OwnerId) + 1;
+                            _deaths[targetId] = _deaths.GetValueOrDefault(targetId) + 1;
+                            Log($"Player {targetId} killed by {bullet.OwnerId} (K:{_kills[bullet.OwnerId]}). Respawning in {GameConstants.RespawnDelay}s");
                         }
 
                         var hitEvent = new HitEventMsg
@@ -925,7 +1033,8 @@ namespace ShootingGame.Server
                             Damage = damage,
                             IsKill = isKill,
                             HitPoint = bullet.Position,
-                            HitFrameId = _frameId
+                            HitFrameId = _frameId,
+                            BodyPart = bodyPart
                         };
 
                         _pendingHitEvents.Add(hitEvent);
@@ -977,14 +1086,22 @@ namespace ShootingGame.Server
 
             // Re-register ECS entity
             var snap = _playerSnapshots[bpId];
+            ApplyGunToSnapshot(ref snap, _playerGuns.GetValueOrDefault(bpId));
+            _playerSnapshots[bpId] = snap;
             var heroConfig = _playerHeroConfigs.GetValueOrDefault(bpId);
             _ecsWorld.RegisterPlayer(bpId, snap, heroConfig);
 
+            _spawnPositions[bpId] = spawnPos;
+            _stuckTicks[bpId] = 0;
             Log($"Player {bpId} respawned at ({spawnPos.x:F1}, {spawnPos.y:F1}, {spawnPos.z:F1})");
         }
 
         private Vec3 GetRespawnPosition(int bpId, int teamId)
         {
+            // FFA：从 any 池随机选点，避免固定重生点被蹲
+            if (IsDeathmatch && _anySpawnPoints.Count > 0)
+                return _anySpawnPoints[_spawnRng.Next(_anySpawnPoints.Count)].Position;
+
             var pool = teamId == 1 ? _team1SpawnPoints :
                        teamId == 2 ? _team2SpawnPoints :
                        _anySpawnPoints;
@@ -994,13 +1111,52 @@ namespace ShootingGame.Server
 
             if (pool != null && pool.Count > 0)
             {
-                var sp = pool[bpId % pool.Count];
+                var sp = pool[_spawnRng.Next(pool.Count)];
                 return sp.Position;
             }
 
             return bpId < DefaultSpawnPositions.Length
                 ? DefaultSpawnPositions[bpId]
                 : new Vec3(bpId * 2, 0, 0);
+        }
+
+        /// <summary>
+        /// 死斗结束判定：任一玩家达到击杀目标，或对局时间耗尽。
+        /// 时间耗尽时击杀最多者胜（平手比死亡少、再比 bpId 小）。
+        /// </summary>
+        private bool CheckDeathmatchEnd()
+        {
+            _matchElapsed += _frameInterval;
+
+            foreach (var kvp in _kills)
+            {
+                if (kvp.Value >= Context.KillTarget)
+                {
+                    _killerPlayerId = kvp.Key;
+                    return true;
+                }
+            }
+
+            if (_matchElapsed >= Context.TimeLimit)
+            {
+                int bestBp = -1, bestKills = -1, bestDeaths = int.MaxValue;
+                foreach (var kvp in _kills)
+                {
+                    int d = _deaths.GetValueOrDefault(kvp.Key);
+                    if (kvp.Value > bestKills ||
+                        (kvp.Value == bestKills && d < bestDeaths) ||
+                        (kvp.Value == bestKills && d == bestDeaths && kvp.Key < bestBp))
+                    {
+                        bestBp = kvp.Key;
+                        bestKills = kvp.Value;
+                        bestDeaths = d;
+                    }
+                }
+                _killerPlayerId = bestBp;
+                return true;
+            }
+
+            return false;
         }
 
         private bool IsTeamEliminated()
@@ -1067,11 +1223,15 @@ namespace ShootingGame.Server
                     FireCooldown = snap.FireCooldown,
                     RotationY = rotationY,
                     IsRunning = isRunning,
+                    IsAiming = _playerIsAiming.GetValueOrDefault(bpId),
+                    IsCrouching = _playerIsCrouching.GetValueOrDefault(bpId),
                     CurrentAmmo = snap.CurrentAmmo,
                     IsReloading = snap.IsReloading,
                     TagBitmask = snap.TagBitmask,
                     ActiveAbilities = activeAbilities,
-                    MaxHp = _playerHeroConfigs.TryGetValue(bpId, out var hc) ? hc.MaxHP : GameConstants.MaxHealth
+                    MaxHp = _playerHeroConfigs.TryGetValue(bpId, out var hc) ? hc.MaxHP : GameConstants.MaxHealth,
+                    Kills = _kills.GetValueOrDefault(bpId),
+                    Deaths = _deaths.GetValueOrDefault(bpId)
                 });
             }
         }
@@ -1140,8 +1300,27 @@ namespace ShootingGame.Server
             {
                 RequestCode = RequestCode.Battle,
                 ActionCode = ActionCode.GameOver,
-                Str = _killerTeamId.ToString()
+                // IntVal: 0=团队模式(Str=胜利队伍ID) 1=死斗(Str=胜者 bpId)
+                IntVal = Context.Mode,
+                Str = IsDeathmatch ? _killerPlayerId.ToString() : _killerTeamId.ToString()
             };
+
+            // 记分板（按击杀降序，平手比死亡少）
+            var entries = new List<ScoreEntryMsg>();
+            foreach (var kvp in _kills)
+            {
+                var player = Context.Players.Find(pl => Context.GetBattlePlayerId(pl.UserId) == kvp.Key);
+                entries.Add(new ScoreEntryMsg
+                {
+                    PlayerId = kvp.Key,
+                    PlayerName = player != null ? player.Username : $"Player_{kvp.Key}",
+                    Kills = kvp.Value,
+                    Deaths = _deaths.GetValueOrDefault(kvp.Key)
+                });
+            }
+            entries.Sort((a, b) => b.Kills != a.Kills ? b.Kills - a.Kills : a.Deaths - b.Deaths);
+            pack.ScoreEntries.AddRange(entries);
+
             OnSendPacket?.Invoke(endpoint, pack);
         }
 
@@ -1186,18 +1365,36 @@ namespace ShootingGame.Server
 
         private int CalculateBodyPartDamage(int baseDamage, Vec3 hitPoint, Vec3 playerBasePos)
         {
+            return CalculateBodyPartDamage(baseDamage, hitPoint, playerBasePos, out _);
+        }
+
+        /// <summary>部位: 0=胸 1=头 2=腹 3=四肢</summary>
+        private int CalculateBodyPartDamage(int baseDamage, Vec3 hitPoint, Vec3 playerBasePos, out int bodyPart)
+        {
             float relativeY = hitPoint.y - playerBasePos.y;
             float ratio = relativeY / GameConstants.PlayerHeight;
 
             float multiplier;
             if (ratio >= GameConstants.HeadHeightRatio)
+            {
                 multiplier = GameConstants.HeadDamageMultiplier;
+                bodyPart = 1;
+            }
             else if (ratio >= GameConstants.ChestHeightRatio)
+            {
                 multiplier = GameConstants.ChestDamageMultiplier;
+                bodyPart = 0;
+            }
             else if (ratio >= GameConstants.AbdomenHeightRatio)
+            {
                 multiplier = GameConstants.AbdomenDamageMultiplier;
+                bodyPart = 2;
+            }
             else
+            {
                 multiplier = GameConstants.LimbDamageMultiplier;
+                bodyPart = 3;
+            }
 
             return Math.Max(1, (int)(baseDamage * multiplier));
         }
@@ -1216,6 +1413,7 @@ namespace ShootingGame.Server
         public int AttackId;
         public int OwnerId;
         public int OwnerTeamId;
+        public ShootingGame.Shared.Hero.GunConfigData Gun;
         public Vec3 Position;
         public Vec3 Direction;
         public float Speed;

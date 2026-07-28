@@ -21,7 +21,7 @@ namespace ShootingGame.Shared.ECS
 
             if (input.Fire && cooldown.Cooldown <= 0f && !reload.IsReloading && ammo.Current > 0)
             {
-                cooldown.Cooldown = GameConstants.FireRate;
+                cooldown.Cooldown = cooldown.Rate > 0f ? cooldown.Rate : GameConstants.FireRate;
                 ammo.Current--;
                 em.SetComponent(entity, cooldown);
                 em.SetComponent(entity, ammo);

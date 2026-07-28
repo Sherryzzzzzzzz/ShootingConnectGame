@@ -80,20 +80,20 @@ namespace ShootingGame.Shared.Simulation
                 snap.ReloadTimer -= dt;
                 if (snap.ReloadTimer <= 0f)
                 {
-                    snap.CurrentAmmo = GameConstants.MaxAmmoPerClip;
+                    snap.CurrentAmmo = snap.MaxAmmo;
                     snap.IsReloading = false;
                     snap.ReloadTimer = 0f;
                 }
             }
-            else if (input.Reload && snap.CurrentAmmo < GameConstants.MaxAmmoPerClip)
+            else if (input.Reload && snap.CurrentAmmo < snap.MaxAmmo)
             {
                 snap.IsReloading = true;
-                snap.ReloadTimer = GameConstants.ReloadTime;
+                snap.ReloadTimer = snap.ReloadDuration;
             }
 
             if (input.Fire && snap.FireCooldown <= 0f && !snap.IsReloading && snap.CurrentAmmo > 0)
             {
-                snap.FireCooldown = GameConstants.FireRate;
+                snap.FireCooldown = snap.FireInterval;
                 snap.CurrentAmmo--;
             }
 

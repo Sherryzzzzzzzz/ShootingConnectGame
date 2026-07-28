@@ -19,3 +19,14 @@ E:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\obj\Debug\netsta
 E:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\obj\Debug\netstandard2.1\ShootingGame.Shared.sourcelink.json
 E:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\obj\Debug\netstandard2.1\ShootingGame.Shared.dll
 E:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\obj\Debug\netstandard2.1\ShootingGame.Shared.pdb
+F:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\obj\Debug\netstandard2.1\ShootingGame.Shared.csproj.AssemblyReference.cache
+F:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\obj\Debug\netstandard2.1\ShootingGame.Shared.GeneratedMSBuildEditorConfig.editorconfig
+F:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\obj\Debug\netstandard2.1\ShootingGame.Shared.AssemblyInfoInputs.cache
+F:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\obj\Debug\netstandard2.1\ShootingGame.Shared.AssemblyInfo.cs
+F:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\obj\Debug\netstandard2.1\ShootingGame.Shared.csproj.CoreCompileInputs.cache
+F:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\obj\Debug\netstandard2.1\ShootingGame.Shared.sourcelink.json
+F:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\obj\Debug\netstandard2.1\ShootingGame.Shared.dll
+F:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\obj\Debug\netstandard2.1\ShootingGame.Shared.pdb
+F:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\bin\Debug\netstandard2.1\ShootingGame.Shared.deps.json
+F:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\bin\Debug\netstandard2.1\ShootingGame.Shared.dll
+F:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\bin\Debug\netstandard2.1\ShootingGame.Shared.pdb

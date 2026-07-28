@@ -69,7 +69,9 @@ namespace ShootingGame.Tests
             snap.VerticalVelocity = 0f;
 
             var input = MakeInput();
+            // 第一帧只积累重力速度（位移用的是帧初速度），第二帧才产生下落位移
             var result = PlayerSimulation.Simulate(snap, input, DT);
+            result = PlayerSimulation.Simulate(result, input, DT);
 
             Assert.True(result.VerticalVelocity < 0f);
             Assert.True(result.Position.y < 10f);

@@ -566,6 +566,13 @@ namespace ShootingGame.Server
             return -1;
         }
 
+        private void HandlePlayerDisconnect(int playerIdx, float currentTime)
+        {
+            DisconnectPlayer(playerIdx, "session timed out");
+        }
+
+        private void DebugLog(string message) => Log(message);
+
         private void Log(string message)
         {
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] {message}");

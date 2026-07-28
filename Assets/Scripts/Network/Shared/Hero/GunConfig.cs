@@ -27,18 +27,51 @@ namespace ShootingGame.Shared.Hero
         public GameObject MuzzleFlashPrefab;
         public GameObject ShellPrefab;
         public AudioClip FireSound;
-    }
 
-    public enum FireMode
-    {
-        Single,   // 单发/半自动
-        Auto,     // 连发/全自动
-        Shotgun   // 霰弹
-    }
+        [Header("弹道模拟")]
+        public float BulletSpeed = 100f;    // 弹速(米/秒), 仅 Projectile 有效
 
-    public enum BulletType
-    {
-        Hitscan,    // 即时命中（射线）
-        Projectile  // 飞行弹道（慢速子弹）
+        [Header("伤害衰减")]
+        public float FalloffStart = 1e9f;   // 衰减起始距离(米), 默认不衰减
+        public float FalloffEnd = 1e9f;     // 衰减结束距离(米)
+        public float FalloffMinMultiplier = 1f; // 最低伤害倍率
+
+        [Header("后坐(纯视觉)")]
+        public float RecoilKick = 0f;       // 单发后坐上抬量(FreeLook Y 轴单位)
+
+        [Header("扩散(Valorant 手感)")]
+        public float MoveSpreadAdd = 0f;    // 移动时额外散射角(度)
+        public float BloomPerShot = 0f;     // 每连发一发增加的散射角(度)
+        public float BloomMax = 0f;         // 连发扩散上限(度)
+        public float BloomRecover = 0f;     // 每秒恢复的扩散角(度)
+
+        /// <summary>
+        /// 导出为双端共用的模拟数据（id = SO 资产名）。
+        /// </summary>
+        public GunConfigData ToGunConfigData(string id)
+        {
+            return new GunConfigData
+            {
+                Id = id,
+                GunName = GunName,
+                FireMode = FireMode,
+                Bullet = Bullet,
+                FireRate = FireRate,
+                Damage = Damage,
+                ClipSize = ClipSize,
+                ReloadTime = ReloadTime,
+                Range = Range,
+                SpreadAngle = SpreadAngle,
+                RecoilKick = RecoilKick,
+                BulletSpeed = BulletSpeed,
+                FalloffStart = FalloffStart,
+                FalloffEnd = FalloffEnd,
+                FalloffMinMultiplier = FalloffMinMultiplier,
+                MoveSpreadAdd = MoveSpreadAdd,
+                BloomPerShot = BloomPerShot,
+                BloomMax = BloomMax,
+                BloomRecover = BloomRecover,
+            };
+        }
     }
 }

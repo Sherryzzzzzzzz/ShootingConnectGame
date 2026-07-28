@@ -56,6 +56,17 @@ public class BattleUI : MonoBehaviour
     [SerializeField] private TMP_Text pingText;
     [SerializeField] private TMP_Text fpsText;
 
+    // 记分板（Tab）
+    private GameObject scoreboardPanel;
+    private Transform scoreboardContainer;
+    private readonly List<TMP_Text> _scoreboardRows = new List<TMP_Text>();
+
+    // 击杀横幅（爆头/首杀）
+    private TMP_Text killBannerText;
+    private float _killBannerTimer;
+    private const float KillBannerDuration = 2.5f;
+    private bool _firstBloodHappened;
+
     // 状态
     private int _currentHp = 100;
     private int _maxHp = 100;
@@ -155,15 +166,59 @@ public class BattleUI : MonoBehaviour
             }
         }
 
+        // 击杀横幅淡出
+        if (_killBannerTimer > 0)
+        {
+            _killBannerTimer -= Time.deltaTime;
+            if (_killBannerTimer <= 0 && killBannerText != null)
+                killBannerText.gameObject.SetActive(false);
+        }
+
+        // Tab 记分板（按住显示）。安全访问 Keyboard，防止 InputSystem 未初始化时抛异常
+        if (scoreboardPanel != null && BattleManager.Instance != null &&
+            BattleManager.Instance.State == BattleManager.BattleState.Playing)
+        {
+            bool show = false;
+            try
+            {
+                var kb = UnityEngine.InputSystem.Keyboard.current;
+                show = kb != null && kb.tabKey.isPressed;
+            }
+            catch { /* InputSystem 未初始化——忽略 */ }
+
+            if (show != scoreboardPanel.activeSelf)
+            {
+                scoreboardPanel.SetActive(show);
+                if (show) RefreshScoreboard();
+            }
+            else if (show)
+            {
+                RefreshScoreboard();
+            }
+        }
+
         // 更新网络状态显示
         UpdateNetworkStatus();
 
         // 更新弹药显示
         UpdateAmmoDisplay();
 
+        // 准星扩散
+        UpdateCrosshairBloom();
+
+        // 服务器权威 K/D 节流刷新
+        _scoreRefreshTimer += Time.deltaTime;
+        if (_scoreRefreshTimer >= 0.5f)
+        {
+            _scoreRefreshTimer = 0f;
+            UpdateScoreDisplay();
+        }
+
         // 更新 FPS
         UpdateFPS();
     }
+
+    private float _scoreRefreshTimer;
 
     #region 血条
 
@@ -210,8 +265,8 @@ public class BattleUI : MonoBehaviour
 
     private void UpdateAmmoDisplay()
     {
-        int currentAmmo = GameConstants.MaxAmmoPerClip;
-        int maxAmmo = GameConstants.MaxAmmoPerClip;
+        int currentAmmo = 30; // 回退值，实际由 ECS AmmoComponent 覆盖
+        int maxAmmo = 30;
         bool isReloading = false;
 
         // Read from local player's ECS entity for real-time prediction
@@ -253,14 +308,30 @@ public class BattleUI : MonoBehaviour
 
     private void UpdateScoreDisplay()
     {
+        // 优先用服务器权威 K/D（最新帧），回退到本地计数
+        int kills = _kills, deaths = _deaths;
+        var frame = BattleClient.Instance != null ? BattleClient.Instance.GetLatestFrame() : null;
+        if (frame?.PlayerStates != null)
+        {
+            foreach (var ps in frame.PlayerStates)
+            {
+                if (ps.PlayerId == BattleClient.Instance.BattlePlayerId)
+                {
+                    kills = ps.Kills;
+                    deaths = ps.Deaths;
+                    break;
+                }
+            }
+        }
+
         if (killsText != null)
         {
-            killsText.text = $"击杀: {_kills}";
+            killsText.text = $"击杀: {kills}";
         }
 
         if (deathsText != null)
         {
-            deathsText.text = $"死亡: {_deaths}";
+            deathsText.text = $"死亡: {deaths}";
         }
     }
 
@@ -276,6 +347,26 @@ public class BattleUI : MonoBehaviour
         _crosshairHitTimer = crosshairHitFlashDuration;
     }
 
+    // 准星扩散：随当前散射角放大（Valorant 式 bloom 反馈）
+    private NetPlayerController _localPlayer;
+    private float _playerFindTimer;
+
+    private void UpdateCrosshairBloom()
+    {
+        if (crosshair == null) return;
+
+        _playerFindTimer -= Time.deltaTime;
+        if (_localPlayer == null && _playerFindTimer <= 0f)
+        {
+            _localPlayer = FindFirstObjectByType<NetPlayerController>();
+            _playerFindTimer = 1f;
+        }
+
+        float spread = _localPlayer != null ? _localPlayer.CurrentSpreadDeg : 0f;
+        float scale = 1f + spread * 0.15f;
+        crosshair.rectTransform.localScale = new Vector3(scale, scale, 1f);
+    }
+
     #endregion
 
     #region 击杀信息
@@ -288,27 +379,39 @@ public class BattleUI : MonoBehaviour
         // 检查是否涉及本地玩家
         bool isLocalKiller = BattleClient.Instance != null && hitEvent.AttackerId == BattleClient.Instance.BattlePlayerId;
         bool isLocalVictim = BattleClient.Instance != null && hitEvent.VictimId == BattleClient.Instance.BattlePlayerId;
+        bool isHeadshot = hitEvent.BodyPart == 1;
 
         // 更新计分
         if (isLocalKiller)
         {
             _kills++;
             OnHitEnemy();
+
+            // 击杀横幅：首杀 > 爆头
+            if (!_firstBloodHappened)
+            {
+                ShowKillBanner("首杀！", new Color(1f, 0.5f, 0.2f));
+            }
+            else if (isHeadshot)
+            {
+                ShowKillBanner("爆头击杀！", new Color(1f, 0.85f, 0.2f));
+            }
         }
         if (isLocalVictim)
         {
             _deaths++;
         }
+        _firstBloodHappened = true;
         UpdateScoreDisplay();
 
         // 显示击杀信息
         string killerName = GetPlayerName(hitEvent.AttackerId);
         string victimName = GetPlayerName(hitEvent.VictimId);
 
-        AddKillFeedItem(killerName, victimName, isLocalKiller, isLocalVictim);
+        AddKillFeedItem(killerName, victimName, isLocalKiller, isLocalVictim, isHeadshot);
     }
 
-    private void AddKillFeedItem(string killer, string victim, bool isLocalKiller, bool isLocalVictim)
+    private void AddKillFeedItem(string killer, string victim, bool isLocalKiller, bool isLocalVictim, bool isHeadshot = false)
     {
         if (killFeedContainer == null || killFeedItemPrefab == null) return;
 
@@ -320,7 +423,8 @@ public class BattleUI : MonoBehaviour
         {
             string colorTag = isLocalKiller ? "<color=green>" : "<color=red>";
             string endTag = "</color>";
-            text.text = $"{colorTag}{killer}{endTag} 击杀了 {colorTag}{victim}{endTag}";
+            string headshotTag = isHeadshot ? "<color=#ffd94d>[爆头] </color>" : "";
+            text.text = $"{headshotTag}{colorTag}{killer}{endTag} 击杀了 {colorTag}{victim}{endTag}";
         }
 
         _killFeedItems.Enqueue(item);
@@ -338,21 +442,127 @@ public class BattleUI : MonoBehaviour
 
     private string GetPlayerName(int playerId)
     {
-        if (BattleClient.Instance != null && playerId == BattleClient.Instance.BattlePlayerId)
-            return "你";
-
+        if (BattleClient.Instance != null)
+            return BattleClient.Instance.GetPlayerName(playerId);
         return $"玩家{playerId}";
+    }
+
+    #endregion
+
+    #region 记分板
+
+    /// <summary>刷新 Tab 记分板：从服务器最新帧取各玩家 K/D（服务器权威），按击杀降序。</summary>
+    private void RefreshScoreboard()
+    {
+        if (scoreboardContainer == null) return;
+
+        var entries = new List<(string name, int kills, int deaths, bool isLocal)>();
+        var frame = BattleClient.Instance != null ? BattleClient.Instance.GetLatestFrame() : null;
+        if (frame?.PlayerStates != null)
+        {
+            foreach (var ps in frame.PlayerStates)
+            {
+                bool isLocal = BattleClient.Instance != null && ps.PlayerId == BattleClient.Instance.BattlePlayerId;
+                entries.Add((GetPlayerName(ps.PlayerId), ps.Kills, ps.Deaths, isLocal));
+            }
+        }
+        entries.Sort((a, b) => b.kills != a.kills ? b.kills - a.kills : a.deaths - b.deaths);
+        FillScoreboardRows(entries);
+    }
+
+    /// <summary>用给定数据填充记分板行（行不够则新建）。</summary>
+    private void FillScoreboardRows(List<(string name, int kills, int deaths, bool isLocal)> entries)
+    {
+        for (int i = 0; i < entries.Count; i++)
+        {
+            TMP_Text row;
+            if (i < _scoreboardRows.Count)
+            {
+                row = _scoreboardRows[i];
+            }
+            else
+            {
+                row = CreateTMPText(scoreboardContainer, $"Row{i}", "", _cjkFallbackFont, 20, Color.white, TextAlignmentOptions.Left);
+                var rect = row.GetComponent<RectTransform>();
+                rect.sizeDelta = new Vector2(460, 26);
+                _scoreboardRows.Add(row);
+            }
+
+            var e = entries[i];
+            string medal = i == 0 ? "★ " : $"{i + 1}. ";
+            row.text = $"{medal}{e.name}    <color=#7f7>{e.kills}</color> / <color=#f77>{e.deaths}</color>";
+            row.color = e.isLocal ? new Color(1f, 0.9f, 0.4f) : Color.white;
+            row.gameObject.SetActive(true);
+        }
+        for (int i = entries.Count; i < _scoreboardRows.Count; i++)
+            _scoreboardRows[i].gameObject.SetActive(false);
+    }
+
+    /// <summary>展示最终记分板（GameOver 时调用，不依赖 Tab）。</summary>
+    private void ShowFinalScoreboard()
+    {
+        if (scoreboardPanel == null) return;
+
+        var entries = new List<(string name, int kills, int deaths, bool isLocal)>();
+        var board = BattleClient.Instance != null ? BattleClient.Instance.LastScoreboard : null;
+        if (board != null && board.Count > 0)
+        {
+            foreach (var se in board)
+            {
+                bool isLocal = BattleClient.Instance != null && se.PlayerId == BattleClient.Instance.BattlePlayerId;
+                entries.Add((se.PlayerName ?? GetPlayerName(se.PlayerId), se.Kills, se.Deaths, isLocal));
+            }
+        }
+        else
+        {
+            // 老服务器无记分板数据：回退到最新帧
+            RefreshScoreboard();
+            scoreboardPanel.SetActive(true);
+            return;
+        }
+
+        FillScoreboardRows(entries);
+        scoreboardPanel.SetActive(true);
+    }
+
+    #endregion
+
+    #region 击杀横幅
+
+    private void ShowKillBanner(string text, Color color)
+    {
+        if (killBannerText == null) return;
+        killBannerText.text = text;
+        killBannerText.color = color;
+        killBannerText.gameObject.SetActive(true);
+        _killBannerTimer = KillBannerDuration;
     }
 
     #endregion
 
     #region 游戏结束
 
-    private void ShowGameOverUI(int winnerTeamId)
+    private void ShowGameOverUI(int winnerId)
     {
         if (gameOverPanel == null) return;
 
-        bool isVictory = BattleClient.Instance != null && BattleClient.Instance.TeamId == winnerTeamId;
+        int mode = BattleClient.Instance != null ? BattleClient.Instance.LastGameOverMode : 0;
+        bool isVictory;
+        string subtitle;
+
+        if (mode == 1)
+        {
+            // 死斗：winnerId 是胜者 bpId
+            isVictory = BattleClient.Instance != null && BattleClient.Instance.BattlePlayerId == winnerId;
+            string winnerName = BattleClient.Instance != null ? BattleClient.Instance.GetPlayerName(winnerId) : $"玩家{winnerId}";
+            subtitle = isVictory ? "你是本场最佳！" : $"{winnerName} 拿下了本场最佳";
+        }
+        else
+        {
+            // 团队模式：winnerId 是队伍 ID
+            isVictory = BattleClient.Instance != null && BattleClient.Instance.TeamId == winnerId;
+            subtitle = $"胜利队伍: {winnerId}";
+        }
 
         if (gameOverTitle != null)
         {
@@ -362,10 +572,13 @@ public class BattleUI : MonoBehaviour
 
         if (gameOverSubtitle != null)
         {
-            gameOverSubtitle.text = $"胜利队伍: {winnerTeamId}";
+            gameOverSubtitle.text = subtitle;
         }
 
         gameOverPanel.SetActive(true);
+
+        // 结算时展示最终记分板
+        ShowFinalScoreboard();
     }
 
     private void HideGameOverUI()
@@ -373,6 +586,10 @@ public class BattleUI : MonoBehaviour
         if (gameOverPanel != null)
         {
             gameOverPanel.SetActive(false);
+        }
+        if (scoreboardPanel != null)
+        {
+            scoreboardPanel.SetActive(false);
         }
     }
 
@@ -383,11 +600,13 @@ public class BattleUI : MonoBehaviour
     private void OnBattleStartHandler()
     {
         HideMatchingUI();
+        HideGameOverUI();
         // 重置血量为满血
-        _currentHp = GameConstants.MaxHealth;
-        _maxHp = GameConstants.MaxHealth;
+        _currentHp = 100;
+        _maxHp = 100; // 运行时由 OnHpChanged/SetHealth 更新为英雄真实血量
         _kills = 0;
         _deaths = 0;
+        _firstBloodHappened = false;
         UpdateHealthDisplay();
         UpdateScoreDisplay();
     }
@@ -517,17 +736,13 @@ public class BattleUI : MonoBehaviour
         scaler.matchWidthOrHeight = 0.5f;
         canvasGo.AddComponent<GraphicRaycaster>();
 
-        // EventSystem（按钮点击需要 — 必须使用 InputSystemUIInputModule）
+        // EventSystem：战斗内不需要 UI 交互（Tab 记分板也不走 EventSystem），
+        // EventSystem+InputModule 会吞键盘鼠标事件导致游戏输入失效——直接禁用
         var eventSystem = FindFirstObjectByType<EventSystem>();
-        if (eventSystem == null)
+        if (eventSystem != null)
         {
-            var esGo = new GameObject("EventSystem");
-            esGo.transform.SetParent(transform, false);
-            eventSystem = esGo.AddComponent<EventSystem>();
-        }
-        if (eventSystem.GetComponent<InputSystemUIInputModule>() == null)
-        {
-            eventSystem.gameObject.AddComponent<InputSystemUIInputModule>();
+            eventSystem.enabled = false;
+            Debug.Log("[BattleUI] 已禁用 EventSystem（防止吞游戏输入）");
         }
 
         // TMP 字体 — 多路径回退
@@ -555,9 +770,15 @@ public class BattleUI : MonoBehaviour
         CreateCrosshairUI(canvasGo.transform);
         CreateScoreUI(canvasGo.transform, font);
         CreateKillFeedUI(canvasGo.transform, font);
+        CreateKillBannerUI(canvasGo.transform, font);
+        CreateScoreboardUI(canvasGo.transform, font);
         CreateGameOverPanelUI(canvasGo.transform, font);
         CreateMatchingPanelUI(canvasGo.transform, font);
         CreateNetworkStatusUI(canvasGo.transform, font);
+
+        // 技能栏（Q/E）——之前是死代码，挂到本对象上启用
+        if (AbilityBar.Instance == null)
+            gameObject.AddComponent<AbilityBar>();
 
         // 默认颜色渐变
         if (healthColorGradient == null)
@@ -839,6 +1060,70 @@ public class BattleUI : MonoBehaviour
         tmp.alignment = TextAlignmentOptions.Right;
         var tmpRect = killFeedItemPrefab.GetComponent<RectTransform>();
         tmpRect.sizeDelta = new Vector2(340, 22);
+    }
+
+    private void CreateKillBannerUI(Transform canvasTransform, TMP_FontAsset font)
+    {
+        // 击杀横幅（屏幕中上方，爆头/首杀提示）
+        killBannerText = CreateTMPText(canvasTransform, "KillBanner", "", font, 42, new Color(1f, 0.85f, 0.2f));
+        var rect = killBannerText.GetComponent<RectTransform>();
+        rect.anchorMin = new Vector2(0.5f, 0.78f);
+        rect.anchorMax = new Vector2(0.5f, 0.78f);
+        rect.pivot = new Vector2(0.5f, 0.5f);
+        rect.sizeDelta = new Vector2(600, 60);
+        killBannerText.alignment = TextAlignmentOptions.Center;
+        killBannerText.fontStyle = FontStyles.Bold;
+        killBannerText.gameObject.SetActive(false);
+    }
+
+    private void CreateScoreboardUI(Transform canvasTransform, TMP_FontAsset font)
+    {
+        // 记分板（屏幕中央偏左，按住 Tab 显示 / 结算时显示）
+        scoreboardPanel = new GameObject("ScoreboardPanel");
+        scoreboardPanel.transform.SetParent(canvasTransform, false);
+        var rect = scoreboardPanel.AddComponent<RectTransform>();
+        rect.anchorMin = new Vector2(0.5f, 0.5f);
+        rect.anchorMax = new Vector2(0.5f, 0.5f);
+        rect.pivot = new Vector2(0.5f, 0.5f);
+        rect.sizeDelta = new Vector2(520, 420);
+
+        var bg = scoreboardPanel.AddComponent<Image>();
+        bg.color = new Color(0f, 0f, 0f, 0.8f);
+
+        var title = CreateTMPText(scoreboardPanel.transform, "Title", "记分板", font, 26, Color.white, TextAlignmentOptions.Center);
+        var titleRect = title.GetComponent<RectTransform>();
+        titleRect.anchorMin = new Vector2(0f, 1f);
+        titleRect.anchorMax = new Vector2(1f, 1f);
+        titleRect.pivot = new Vector2(0.5f, 1f);
+        titleRect.sizeDelta = new Vector2(0, 40);
+        titleRect.anchoredPosition = new Vector2(0, -8);
+
+        var header = CreateTMPText(scoreboardPanel.transform, "Header", "玩家            击杀 / 死亡", font, 18, new Color(0.7f, 0.7f, 0.7f), TextAlignmentOptions.Left);
+        var headerRect = header.GetComponent<RectTransform>();
+        headerRect.anchorMin = new Vector2(0f, 1f);
+        headerRect.anchorMax = new Vector2(1f, 1f);
+        headerRect.pivot = new Vector2(0.5f, 1f);
+        headerRect.sizeDelta = new Vector2(-40, 26);
+        headerRect.anchoredPosition = new Vector2(0, -52);
+
+        var listGo = new GameObject("Rows");
+        listGo.transform.SetParent(scoreboardPanel.transform, false);
+        var listRect = listGo.AddComponent<RectTransform>();
+        listRect.anchorMin = new Vector2(0f, 0f);
+        listRect.anchorMax = new Vector2(1f, 1f);
+        listRect.offsetMin = new Vector2(20, 12);
+        listRect.offsetMax = new Vector2(-20, -86);
+
+        var layout = listGo.AddComponent<VerticalLayoutGroup>();
+        layout.childAlignment = TextAnchor.UpperLeft;
+        layout.childControlHeight = false;
+        layout.childControlWidth = false;
+        layout.childForceExpandHeight = false;
+        layout.childForceExpandWidth = false;
+        layout.spacing = 4;
+
+        scoreboardContainer = listGo.transform;
+        scoreboardPanel.SetActive(false);
     }
 
     private void CreateGameOverPanelUI(Transform canvasTransform, TMP_FontAsset font)

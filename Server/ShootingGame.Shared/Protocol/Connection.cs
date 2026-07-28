@@ -1,5 +1,6 @@
 using System;
 using System.Net;
+using ShootingGame.Shared.Protocol.Kcp;
 
 namespace ShootingGame.Shared.Protocol
 {
@@ -11,20 +12,20 @@ namespace ShootingGame.Shared.Protocol
     }
 
     /// <summary>
-    /// Manages the connection lifecycle for a single peer connection.
-    /// Handles handshake, heartbeat, and timeout detection.
-    /// Used by both client (single connection to server) and server (per-client).
+    /// Connection lifecycle wrapper around KcpSession.
+    /// Used by GameServer to manage per-client UDP connections.
+    /// Timeout detection and heartbeat are delegated to KcpSession.
     /// </summary>
     public class Connection
     {
         public IPEndPoint RemoteEndPoint;
         public byte PlayerId;
         public ConnectionState State;
-        public KcpChannel Kcp;
+        public KcpSession Session;
 
-        public float LastReceiveTime;
-        public float LastSendTime;
-        public float ConnectTime;
+        public float LastReceiveTime => Session?.LastReceiveTime ?? 0f;
+        public float LastSendTime => Session?.LastSendTime ?? 0f;
+        public float ConnectTime => Session?.ConnectTime ?? 0f;
 
         private const float HeartbeatInterval = 1.0f;
         private const float TimeoutDuration = 5.0f;
@@ -34,29 +35,49 @@ namespace ShootingGame.Shared.Protocol
             RemoteEndPoint = remote;
             PlayerId = playerId;
             State = ConnectionState.Disconnected;
-            Kcp = new KcpChannel(conv, onSend);
+            Session = new KcpSession(conv, onSend);
+            Session.TimeoutDurationSec = TimeoutDuration;
+            Session.HeartbeatIntervalSec = HeartbeatInterval;
         }
 
         public void MarkReceived(float currentTime)
         {
-            LastReceiveTime = currentTime;
+            Session.MarkReceived(currentTime);
         }
 
         public void MarkSent(float currentTime)
         {
-            LastSendTime = currentTime;
+            // Tracked automatically by KcpSession
         }
 
         public bool IsTimedOut(float currentTime)
         {
-            return currentTime - LastReceiveTime > TimeoutDuration;
+            return Session.IsTimedOut;
         }
 
         public bool NeedsHeartbeat(float currentTime)
         {
-            return currentTime - LastSendTime > HeartbeatInterval;
+            return State == ConnectionState.Connected
+                && currentTime - LastSendTime > HeartbeatInterval;
         }
 
-        public float Rtt => Kcp.SmoothedRtt;
+        public float Rtt => Session.SmoothedRtt;
+
+        public void Connect()
+        {
+            State = ConnectionState.Connecting;
+        }
+
+        public void MarkConnected(float currentTime)
+        {
+            State = ConnectionState.Connected;
+            Session.MarkConnected(currentTime);
+        }
+
+        public void Disconnect()
+        {
+            State = ConnectionState.Disconnected;
+            Session.Disconnect();
+        }
     }
 }

@@ -1,0 +1,34 @@
+{
+  "Heroes": [
+    {
+      "HeroId": 1,
+      "Name": "突击兵",
+      "MaxHP": 100,
+      "MoveSpeed": 6.0,
+      "PlayerRadius": 0.35,
+      "PlayerHeight": 1.8,
+      "StartingGunId": "Rifle_SemiAuto",
+      "AbilityAssetIds": [1, 2, 3, 11]
+    },
+    {
+      "HeroId": 2,
+      "Name": "重装兵",
+      "MaxHP": 200,
+      "MoveSpeed": 4.5,
+      "PlayerRadius": 0.5,
+      "PlayerHeight": 2.0,
+      "StartingGunId": "Shotgun_Pump",
+      "AbilityAssetIds": [1, 2, 20, 21]
+    },
+    {
+      "HeroId": 3,
+      "Name": "狙击手",
+      "MaxHP": 75,
+      "MoveSpeed": 5.5,
+      "PlayerRadius": 0.3,
+      "PlayerHeight": 1.7,
+      "StartingGunId": "Sniper_BoltAction",
+      "AbilityAssetIds": [1, 2, 30, 31]
+    }
+  ]
+}

@@ -217,6 +217,9 @@ namespace ShootingGame.Tests
                             // Unreliable — check for WorldState
                             if (unreliablePayload != null)
                             {
+                                // 跳过 KcpSession 的 1 字节心跳包（0xFF 标记，非 GameMessage）
+                                if (unreliablePayload.Length == 1 && unreliablePayload[0] == 0xFF)
+                                    continue;
                                 var gameMsg = ProtobufSerializer.DeserializeGameMessage(unreliablePayload);
                                 if (gameMsg.MsgType == GameMessageType.WorldStateMessage)
                                 {

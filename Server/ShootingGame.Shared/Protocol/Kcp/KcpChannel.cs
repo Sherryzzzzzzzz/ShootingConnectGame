@@ -28,6 +28,13 @@ namespace ShootingGame.Shared.Protocol
 
         public uint Conv => _conv;
         public float SmoothedRtt { get; private set; }
+        public KCP Kcp => _kcp;
+
+        /// <summary>Send raw bytes directly via the output callback (bypasses KCP).</summary>
+        public void SendRaw(byte[] packet)
+        {
+            _output(packet, packet.Length);
+        }
 
         /// <summary>Extract KCP conversation ID from raw data (little-endian, first 4 bytes).</summary>
         public static uint ExtractConv(byte[] data, int offset)

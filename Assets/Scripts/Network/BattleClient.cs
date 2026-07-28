@@ -170,10 +170,19 @@ public class BattleClient : MonoBehaviour
 
                 if (data.Length < 1) continue;
 
-                var pack = ProtobufSerializer.DeserializeMainPack(data);
-
-                // Dispatch to main thread
-                UnityMainThreadDispatcher.Instance.Enqueue(() => HandlePacket(pack));
+                // 反序列化也必须在主线程（ProtopufSerializer 可能创建 Unity 对象）
+                UnityMainThreadDispatcher.Instance.Enqueue(() =>
+                {
+                    try
+                    {
+                        var pack = ProtobufSerializer.DeserializeMainPack(data);
+                        HandlePacket(pack);
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogError($"[BattleClient] HandlePacket error: {ex.Message}");
+                    }
+                });
             }
             catch (Exception ex) when (_running)
             {
@@ -244,6 +253,14 @@ public class BattleClient : MonoBehaviour
 
         BattleId = battleInfo.BattleId;
         BattlePlayerId = localPlayerId;
+
+        // 玩家名字表（记分板/击杀播报用）
+        _playerNames.Clear();
+        foreach (var player in battleInfo.BattlePlayers)
+        {
+            if (!string.IsNullOrEmpty(player.PlayerName))
+                _playerNames[player.PlayerId] = player.PlayerName;
+        }
 
         // Find our team ID
         foreach (var player in battleInfo.BattlePlayers)
@@ -417,12 +434,30 @@ public class BattleClient : MonoBehaviour
 
     private void HandleGameOver(MainPack pack)
     {
-        int winnerTeamId = int.TryParse(pack.Str, out int tid) ? tid : 0;
+        int winnerId = int.TryParse(pack.Str, out int tid) ? tid : 0;
 
-        Debug.Log($"[BattleClient] Game Over! Winner team: {winnerTeamId}");
-        OnGameOver?.Invoke(winnerTeamId);
+        // IntVal: 0=团队模式(winnerId=队伍ID) 1=死斗(winnerId=胜者 bpId)
+        LastGameOverMode = pack.IntVal;
+        LastScoreboard = pack.ScoreEntries ?? new System.Collections.Generic.List<ScoreEntryMsg>();
 
+        Debug.Log($"[BattleClient] Game Over! Mode: {pack.IntVal}, Winner: {winnerId}, Scoreboard: {LastScoreboard.Count} entries");
+        OnGameOver?.Invoke(winnerId);
         IsInBattle = false;
+    }
+
+    /// <summary>上一场对局模式（0=团队 1=死斗），HandleGameOver 时写入</summary>
+    public int LastGameOverMode { get; private set; }
+    /// <summary>上一场记分板（服务器权威，已按击杀降序），HandleGameOver 时写入</summary>
+    public System.Collections.Generic.List<ScoreEntryMsg> LastScoreboard { get; private set; } = new System.Collections.Generic.List<ScoreEntryMsg>();
+
+    // 玩家名字表（bpId → 名字），InitializeBattle 时从 BattleInfo 构建
+    private readonly System.Collections.Generic.Dictionary<int, string> _playerNames = new System.Collections.Generic.Dictionary<int, string>();
+
+    /// <summary>获取玩家显示名（记分板/击杀播报用）</summary>
+    public string GetPlayerName(int playerId)
+    {
+        if (playerId == BattlePlayerId) return "你";
+        return _playerNames.TryGetValue(playerId, out var name) ? name : $"玩家{playerId}";
     }
 
     #endregion

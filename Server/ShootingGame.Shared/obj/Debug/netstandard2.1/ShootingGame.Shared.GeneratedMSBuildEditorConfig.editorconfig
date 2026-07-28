@@ -1,6 +1,6 @@
 is_global = true
 build_property.RootNamespace = ShootingGame.Shared
-build_property.ProjectDir = E:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\
+build_property.ProjectDir = F:\GithubProject\ShootingConnectGame\Server\ShootingGame.Shared\
 build_property.EnableComHosting = 
 build_property.EnableGeneratedComInterfaceComImportInterop = 
 build_property.CsWinRTUseWindowsUIXamlProjections = false

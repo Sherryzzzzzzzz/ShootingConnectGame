@@ -56,8 +56,6 @@ public class NetPlayerController : MonoBehaviour
     // 服务端状态追踪
     private int _lastServerTick = -1;
 
-    // 开火视觉特效
-    private float _localFireCooldown;
     private float _reloadTimer; // 换弹计时器
 
     // ECS
@@ -66,7 +64,6 @@ public class NetPlayerController : MonoBehaviour
     private PlayerCombatBehaviour _combatBehaviour;
 
     // 引用
-    private PlayerModel _playerModel;
     private Camera _mainCam;
     private PlayerInputAction input;
 
@@ -95,42 +92,45 @@ public class NetPlayerController : MonoBehaviour
 
         input = new PlayerInputAction();
 
-        // === 构建版本诊断：确认 Input System 状态 ===
-        Debug.Log($"[BUILD-VER] 2026-05-25-v3 | InputSystem v{UnityEngine.InputSystem.InputSystem.version} | " +
-                  $"devices={UnityEngine.InputSystem.InputSystem.devices.Count} | " +
-                  $"Keyboard.current={(Keyboard.current != null ? Keyboard.current.name : "NULL")} | " +
-                  $"Mouse.current={(Mouse.current != null ? Mouse.current.name : "NULL")} | " +
-                  $"inputActionMap.enabled={input.Simple.enabled} | " +
-                  $"Move.bindings.count={input.Simple.Move.bindings.Count}");
-        // ==============================
+        // 强制确保设备被识别（Unity 6 异步初始化可能漏设备）
+        if (Keyboard.current == null) UnityEngine.InputSystem.InputSystem.AddDevice<Keyboard>();
+        if (Mouse.current == null) UnityEngine.InputSystem.InputSystem.AddDevice<Mouse>();
 
-        // 检测必需组件
-        _playerModel = GetComponent<PlayerModel>();
-        if (_playerModel == null)
-            _playerModel = GetComponentInChildren<PlayerModel>();
-        if (_playerModel == null)
-        {
-            Debug.LogError($"[NetPlayerController] ❌ PlayerModel 组件缺失！请在预制体上添加 PlayerModel。GameObject={gameObject.name}");
-        }
+        // 强制重绑定：清掉 .inputactions 里的绑定，用代码硬追加（绕过 control scheme 匹配问题）
+        if (input.Simple.Move.bindings.Count > 0) input.Simple.Move.ChangeBinding(0).Erase();
+        input.Simple.Move.AddCompositeBinding("2DVector")
+            .With("Up", "<Keyboard>/w").With("Down", "<Keyboard>/s")
+            .With("Left", "<Keyboard>/a").With("Right", "<Keyboard>/d");
+        input.Simple.Move.AddCompositeBinding("2DVector")
+            .With("Up", "<Keyboard>/upArrow").With("Down", "<Keyboard>/downArrow")
+            .With("Left", "<Keyboard>/leftArrow").With("Right", "<Keyboard>/rightArrow");
+        if (input.Simple.Jump.bindings.Count > 0) input.Simple.Jump.ChangeBinding(0).Erase();
+        input.Simple.Jump.AddBinding("<Keyboard>/space");
+        if (input.Simple.LightAttack.bindings.Count > 0) input.Simple.LightAttack.ChangeBinding(0).Erase();
+        input.Simple.LightAttack.AddBinding("<Mouse>/leftButton");
+        if (input.Simple.Reload.bindings.Count > 0) input.Simple.Reload.ChangeBinding(0).Erase();
+        input.Simple.Reload.AddBinding("<Keyboard>/r");
+        if (input.Simple.Run.bindings.Count > 0) input.Simple.Run.ChangeBinding(0).Erase();
+        input.Simple.Run.AddBinding("<Keyboard>/leftShift");
+        if (input.Simple.Aim.bindings.Count > 0) input.Simple.Aim.ChangeBinding(0).Erase();
+        input.Simple.Aim.AddBinding("<Mouse>/rightButton");
+        // 禁用 control scheme 过滤——任何设备都能触发
+        input.bindingMask = null;
+        Debug.Log("[NetPlayerController] 输入绑定已强制覆盖");
 
-        var animancer = GetComponent<Animancer.AnimancerComponent>();
-        if (animancer == null)
-            animancer = GetComponentInChildren<Animancer.AnimancerComponent>();
-        if (animancer == null)
-        {
-            Debug.LogError($"[NetPlayerController] ❌ AnimancerComponent 组件缺失！请在预制体上添加 AnimancerComponent。GameObject={gameObject.name}");
-        }
+        // === 诊断 ===
+        Debug.Log($"[INPUT-INIT] devices={UnityEngine.InputSystem.InputSystem.devices.Count} " +
+                  $"kb={Keyboard.current?.name ?? "NULL"} mouse={Mouse.current?.name ?? "NULL"} " +
+                  $"moveBindings={input.Simple.Move.bindings.Count} enabled={input.Simple.enabled}");
 
-        // 禁用 root motion：联网角色位置由 Simulation 驱动，动画不应移动角色
-        var anim = GetComponent<Animator>();
-        if (anim != null)
-            anim.applyRootMotion = false;
+        // === 诊断 ===
+        Debug.Log($"[INPUT-INIT] devices={UnityEngine.InputSystem.InputSystem.devices.Count} " +
+                  $"kb={Keyboard.current?.name ?? "NULL"} mouse={Mouse.current?.name ?? "NULL"} " +
+                  $"moveBindings={input.Simple.Move.bindings.Count} enabled={input.Simple.enabled}");
 
-        // 检测 AnimationSet
-        if (_playerModel != null && _playerModel.AnimationSet == null)
-        {
-            Debug.LogWarning($"[NetPlayerController] ⚠ PlayerModel.AnimationSet 为空，动画不会播放。请在 Inspector 中指定或放入 Resources/FenNi.asset");
-        }
+        var animancer = GetComponentInChildren<Animancer.AnimancerComponent>(true);
+        var anim = GetComponentInChildren<Animator>(true);
+        if (anim != null) anim.applyRootMotion = false;
     }
 
     private void Start()
@@ -251,11 +251,24 @@ public class NetPlayerController : MonoBehaviour
         _lastServerTick = -1;
         _accumulator = 0f;
 
-        // 重置快照 HP 和弹药
-        _currentSnapshot.Health = GameConstants.MaxHealth;
+        // 重置快照 HP 和弹药（弹药/射速按英雄枪械配置）
+        _currentSnapshot.Health = (byte)(HeroConfig?.MaxHP ?? GameConstants.MaxHealth);
         _currentSnapshot.CurrentAmmo = GameConstants.MaxAmmoPerClip;
         _currentSnapshot.IsReloading = false;
         _currentSnapshot.ReloadTimer = 0f;
+        _bloomHeat = 0f;
+        CurrentSpreadDeg = 0f;
+
+        var gun = HeroConfig?.Gun;
+        if (gun != null)
+        {
+            _currentSnapshot.MaxAmmo = gun.ClipSize;
+            _currentSnapshot.CurrentAmmo = gun.ClipSize;
+            _currentSnapshot.ReloadDuration = gun.ReloadTime;
+            _currentSnapshot.FireInterval = gun.FireRate;
+            if (AttackManager.Instance != null)
+                AttackManager.Instance.FireInterval = gun.FireRate;
+        }
 
         // 重置 ECS 实体
         if (_ecsWorld != null)
@@ -270,11 +283,6 @@ public class NetPlayerController : MonoBehaviour
         }
 
         // 强制进入 idle 动画状态
-        if (_playerModel != null)
-        {
-            _playerModel.ChangeAnimationState(PlayerAnimationState.idle);
-            _playerModel.ChangePlayerState(PlayerState.ground);
-        }
 
         // 更新动态追帧系统
         if (DynamicTickSystem.Instance != null)
@@ -290,8 +298,19 @@ public class NetPlayerController : MonoBehaviour
 
     private void Update()
     {
+        // 连发扩散热度随时间恢复 + 准星扩散角刷新（非开火帧持续衰减）
+        var gunForBloom = HeroConfig?.Gun;
+        if (gunForBloom != null)
+        {
+            if (_bloomHeat > 0f && gunForBloom.BloomRecover > 0f)
+                _bloomHeat = Mathf.Max(0f, _bloomHeat - gunForBloom.BloomRecover * Time.deltaTime);
+            bool isMoving = (_currentSnapshot.Velocity.x * _currentSnapshot.Velocity.x
+                           + _currentSnapshot.Velocity.z * _currentSnapshot.Velocity.z) > 1f;
+            CurrentSpreadDeg = ShootingGame.Shared.Hero.SpreadUtility.ComputeTotalSpread(gunForBloom, isMoving, _bloomHeat);
+        }
+
         // 仅本地玩家运行 Tick 循环和视觉更新；远程玩家的 transform 由 RemotePlayerController 驱动
-        if (_playerModel != null && !_playerModel.isLocalPlayer)
+        if (!this.enabled)
         {
             if (!_warnedNotLocal)
             {
@@ -400,10 +419,12 @@ public class NetPlayerController : MonoBehaviour
         Vec3 posAfter = _currentSnapshot.Position;
 
         // 5. 动画状态机（在物理之后运行，使 JumpState 读到正确的 IsGrounded）
-        if (_playerModel != null)
+        var pgSm = GetComponent<PistolGirlStateMachine>();
+                if (pgSm != null && pgSm.enabled)
         {
-            _playerModel.StateMachineTick(inputFrame, _tickInterval);
+            pgSm.StateMachineTick(inputFrame, _tickInterval, _currentSnapshot);
         }
+
 
         // 5b. 换弹处理
         HandleReload(inputFrame);
@@ -428,13 +449,7 @@ public class NetPlayerController : MonoBehaviour
         // 6. 存储预测快照
         _snapshotHistory.Store(_currentTick, _currentSnapshot);
 
-        // 7. 处理开火视觉特效
-        _localFireCooldown -= _tickInterval;
-        if (inputFrame.Fire && _localFireCooldown <= 0f)
-        {
-            _localFireCooldown = GameConstants.FireRate;
-            ProcessFire(inputFrame);
-        }
+        // 7. 特效/音效改为只在子弹实际发射时触发（移到 SendInputToServer 里）
 
         // 8. 更新帧号
         _currentTick++;
@@ -464,8 +479,27 @@ public class NetPlayerController : MonoBehaviour
             aimPitch = -Mathf.Asin(camForward.y) * Mathf.Rad2Deg;
         }
 
-        // 移动输入根据摄像机朝向旋转（W=摄像机前方, A=摄像机左方）
+        // 移动方向用角色逻辑朝向（客户端预测快照，仅鼠标转动时变，不会因 FreeLook 绕圈），瞄准用相机朝向
+        float moveYaw = _currentSnapshot.Rotation.EulerAngles.y;
+
+        // 移动输入：优先用新 Input System，零值时回退到旧 Input Manager
         Vector2 rawInput = input.Simple.Move.ReadValue<Vector2>();
+        if (rawInput.sqrMagnitude < 0.001f)
+        {
+            float legacyH = Input.GetAxis("Horizontal");
+            float legacyV = Input.GetAxis("Vertical");
+            if (Mathf.Abs(legacyH) > 0.001f || Mathf.Abs(legacyV) > 0.001f)
+            {
+                rawInput = new Vector2(legacyH, legacyV);
+                if (tick <= 5 || tick % 60 == 0)
+                    Debug.Log($"[INPUT-FALLBACK] 新InputSystem返回零，旧InputManager: ({legacyH:F2},{legacyV:F2})");
+            }
+        }
+        // 射击也兜底
+        if (!input.Simple.LightAttack.IsPressed() && Input.GetMouseButton(0))
+        {
+            if (tick <= 5) Debug.Log("[INPUT-FALLBACK] LightAttack.IsPressed=false, Input.GetMouseButton(0)=true");
+        }
 
         // 诊断：同时读取 InputActionAsset 和 Keyboard.current，定位输入丢失层级
         if (tick <= 5 || tick % 60 == 0)
@@ -480,7 +514,7 @@ public class NetPlayerController : MonoBehaviour
                 : "Mouse.current=NULL";
             Debug.Log($"[INPUT-DIAG] tick={tick} rawInput=({rawInput.x:F3},{rawInput.y:F3}) | kb=[{kbState}] | mouse=[{mouseState}] | appFocused={Application.isFocused} | actionEnabled={input.Simple.enabled} | moveEnabled={input.Simple.Move.enabled}");
         }
-        float yawRad = aimYaw * Mathf.Deg2Rad;
+        float yawRad = moveYaw * Mathf.Deg2Rad;
         float cosYaw = Mathf.Cos(yawRad);
         float sinYaw = Mathf.Sin(yawRad);
         float worldX = rawInput.x * cosYaw + rawInput.y * sinYaw;
@@ -513,28 +547,45 @@ public class NetPlayerController : MonoBehaviour
         bool ability4Edge = ability4Pressed && !_lastAbility4Pressed;
         _lastAbility4Pressed = ability4Pressed;
 
-        return new InputFrame
+        // 新 Input System 的 .IsPressed() 可能静默返回 false——用旧 Input Manager 兜底
+        bool newFire = input.Simple.LightAttack.IsPressed();
+        bool oldFire = Input.GetMouseButton(0);
+        bool isFire = newFire || oldFire;
+        // 每 2 秒输出一次原始输入状态，方便排查"按键没反应"
+        if (tick % 120 == 0)
+            Debug.Log($"[RAW-INPUT] obj={gameObject.name} tick={tick} newFire={newFire} oldFire={oldFire} => isFire={isFire}");
+        bool isAim = input.Simple.Aim.IsPressed() || Input.GetMouseButton(1);
+        bool isRun = input.Simple.Run.IsPressed() || Input.GetKey(KeyCode.LeftShift);
+        bool isJump = jumpEdge || Input.GetKeyDown(KeyCode.Space);
+        bool isReload = reloadEdge || Input.GetKeyDown(KeyCode.R);
+        bool ab1 = ability1Edge || Input.GetKeyDown(KeyCode.Alpha1);
+        bool ab2 = ability2Edge || Input.GetKeyDown(KeyCode.Alpha2);
+        bool ab3 = ability3Edge || Input.GetKeyDown(KeyCode.Alpha3);
+        bool ab4 = ability4Edge || Input.GetKeyDown(KeyCode.Alpha4);
+
+        LastInputFrame = new InputFrame
         {
             Tick = tick,
             Movement = new Vec2(worldX, worldZ),
-            Jump = jumpEdge,
-            Run = input.Simple.Run.IsPressed(),
-            Aim = input.Simple.Aim.IsPressed(),
-            Fire = input.Simple.LightAttack.IsPressed(),
-            Reload = reloadEdge,
-            Ability1 = ability1Edge,
-            Ability2 = ability2Edge,
-            Ability3 = ability3Edge,
-            Ability4 = ability4Edge,
+            Jump = isJump,
+            Run = isRun,
+            Aim = isAim,
+            Fire = isFire,
+            Reload = isReload,
+            Ability1 = ab1,
+            Ability2 = ab2,
+            Ability3 = ab3,
+            Ability4 = ab4,
             AimYaw = aimYaw,
-            AimPitch = aimPitch
+            AimPitch = aimPitch,
+            Crouch = Input.GetKey(KeyCode.C) || Input.GetKey(KeyCode.LeftControl)
         };
+
+        return LastInputFrame;
     }
 
     private int _debugLogTick;
     private InputFrame _lastSentInput;
-    private int _localBulletCount;
-    private int _vbmNullWarnCount;
     private int _fireDiagTick;
 
     private void SendInputToServer(InputFrame current)
@@ -562,7 +613,8 @@ public class NetPlayerController : MonoBehaviour
             PosZ = _currentSnapshot.Position.z,
             VelX = _currentSnapshot.Velocity.x,
             VelZ = _currentSnapshot.Velocity.z,
-            IsGrounded = _currentSnapshot.IsGrounded
+            IsGrounded = _currentSnapshot.IsGrounded,
+            Crouch = current.Crouch
         };
 
         // 每60帧打印一次发送数据
@@ -571,50 +623,73 @@ public class NetPlayerController : MonoBehaviour
             Debug.Log($"[SEND] tick={_currentTick} move=({current.Movement.x:F2},{current.Movement.y:F2}) aimYaw={current.AimYaw:F1} aim={current.Aim} run={current.Run} fire={current.Fire} ammo={_currentSnapshot.CurrentAmmo} reload={_currentSnapshot.IsReloading}");
         }
 
-        // 处理攻击（需检查本地弹药状态）
-        if (current.Fire && AttackManager.Instance != null && AttackManager.Instance.CanFire()
+        // 处理攻击（需检查本地弹药状态 + Pistol Girl 的拔枪状态）
+        var pgSm = GetComponent<PistolGirlStateMachine>();
+        bool gunOk = pgSm == null || pgSm.IsGunDrawn; // 无 PG 状态机=老角色,不限制
+        if (current.Fire && gunOk && AttackManager.Instance != null && AttackManager.Instance.CanFire()
             && _currentSnapshot.CurrentAmmo > 0 && !_currentSnapshot.IsReloading)
         {
             if (AttackManager.Instance.TryCreateAttack(current.AimYaw, current.AimPitch, _currentTick, out var attack))
             {
                 operation.AttackOperations.Add(attack);
 
-                // 消耗弹药 + 阻止换弹中开火
+                // 消耗弹药
                 if (_currentSnapshot.CurrentAmmo > 0 && !_currentSnapshot.IsReloading)
                 {
                     _currentSnapshot.CurrentAmmo--;
                 }
 
-                // 生成视觉子弹
+                // 计算弹道（含扩散）
                 var aimRot = Quaternion.Euler(current.AimPitch, current.AimYaw, 0f);
                 var fireDir = aimRot * Vector3.forward;
                 var fireOrigin = GetFireOrigin();
 
-                // 将枪口位置写入 AttackOperation，服务端会用此位置广播给其他客户端
+                var gun = HeroConfig?.Gun;
+                if (gun != null)
+                {
+                    bool isMoving = (_currentSnapshot.Velocity.x * _currentSnapshot.Velocity.x
+                                   + _currentSnapshot.Velocity.z * _currentSnapshot.Velocity.z) > 1f;
+                    float spreadDeg = ShootingGame.Shared.Hero.SpreadUtility.ComputeTotalSpread(gun, isMoving, _bloomHeat);
+                    var sd = ShootingGame.Shared.Hero.SpreadUtility.ApplyConeSpread(
+                        new Vec3(fireDir.x, fireDir.y, fireDir.z), spreadDeg,
+                        ShootingGame.Shared.Hero.SpreadUtility.MakeSeed(attack.AttackId, battleClient.BattlePlayerId));
+                    fireDir = new Vector3(sd.x, sd.y, sd.z);
+
+                    _bloomHeat = Mathf.Min(_bloomHeat + gun.BloomPerShot,
+                        gun.BloomMax > 0f ? gun.BloomMax : _bloomHeat + gun.BloomPerShot);
+                    CurrentSpreadDeg = spreadDeg;
+                }
+
                 attack.SpawnPos = new Vec3(fireOrigin.x, fireOrigin.y, fireOrigin.z);
 
-                Debug.DrawRay(fireOrigin, fireDir * 2f, Color.red, 1f);
+                // 标记为预测子弹（权威帧不再重复生成）
+                AttackManager.Instance.MarkAttackPredicted(attack.AttackId);
 
-                if (VisualBulletManager.Instance != null)
+                // 触发开枪动画 — 子弹、特效、音效由 Coroutine 在关键帧生成
+                var shootSm = GetComponent<PistolGirlStateMachine>();
+                if (shootSm != null)
                 {
-                    VisualBulletManager.Instance.SpawnLocalBullet(fireOrigin, fireDir, attack.AttackId);
-                    // Mark as predicted so authority frame doesn't double-spawn
-                    AttackManager.Instance.MarkAttackPredicted(attack.AttackId);
-
-                    if (_localBulletCount++ < 5 || _localBulletCount % 30 == 0)
-                        Debug.Log($"[LOCAL-BULLET] #{_localBulletCount} atkId={attack.AttackId} origin={fireOrigin} dir={fireDir} visualBulletMgr.active={VisualBulletManager.Instance.GetActiveBulletCount()}");
+                    shootSm.OnShoot(current.Crouch, fireOrigin, fireDir, attack.AttackId);
                 }
                 else
                 {
-                    if (_vbmNullWarnCount++ < 3 || _vbmNullWarnCount % 60 == 0)
-                        Debug.LogWarning($"[LOCAL-BULLET] VisualBulletManager.Instance 为 null！(第{_vbmNullWarnCount}次)");
+                    Debug.LogError($"[FIRE] PistolGirlStateMachine is NULL on {gameObject.name}! 动画和子弹都不会生成！");
                 }
             }
+            else
+            {
+                // CanFire 通过了但 TryCreateAttack 返回 false — 静默失败变为显式日志
+                Debug.LogWarning($"[FIRE-FAIL] CanFire=true but TryCreateAttack failed! cooldown={AttackManager.Instance.GetFireCooldown():F3} pending={AttackManager.Instance.PendingAttackCount} maxPending={32}");
+            }
         }
-        else if (current.Fire && _fireDiagTick++ % 120 == 0)
+        else if (current.Fire && ++_fireDiagTick % 60 == 0)
         {
-            // 诊断：开火条件不满足
-            Debug.Log($"[FIRE-DIAG] Fire=true but blocked: atkMgr={AttackManager.Instance != null} canFire={AttackManager.Instance?.CanFire() ?? false} cooldown={AttackManager.Instance?.GetFireCooldown() ?? -1:F2} pending={AttackManager.Instance?.PendingAttackCount ?? -1}");
+            // 诊断：开火条件不满足 — 打印全部条件状态
+            float cd = AttackManager.Instance?.GetFireCooldown() ?? -1f;
+            int pending = AttackManager.Instance?.PendingAttackCount ?? -1;
+            bool canFire = AttackManager.Instance?.CanFire() ?? false;
+            bool hasFrame = AttackManager.Instance?.HasReceivedServerFrame ?? false;
+            Debug.Log($"[FIRE-BLOCKED] obj={gameObject.name} gunOk={gunOk} ammo={_currentSnapshot.CurrentAmmo} reloading={_currentSnapshot.IsReloading} canFire={canFire} hasFrame={hasFrame} cooldown={cd:F3} pending={pending}");
         }
 
         // 处理英雄技能激活（1/2/3/4键）
@@ -677,40 +752,19 @@ public class NetPlayerController : MonoBehaviour
             if (_reloadTimer <= 0f)
             {
                 // 换弹完成
-                _currentSnapshot.CurrentAmmo = GameConstants.MaxAmmoPerClip;
+                _currentSnapshot.CurrentAmmo = _currentSnapshot.MaxAmmo; // 枪械弹夹容量
                 _currentSnapshot.IsReloading = false;
                 _reloadTimer = 0f;
             }
             return;
         }
 
-        // 按 R 键且弹药不满 → 开始换弹
-        if (input.Reload && _currentSnapshot.CurrentAmmo < GameConstants.MaxAmmoPerClip)
+        // 按 R 键且弹药不满 → 开始换弹（最大弹药走枪械配置）
+        if (input.Reload && _currentSnapshot.CurrentAmmo < _currentSnapshot.MaxAmmo)
         {
             _currentSnapshot.IsReloading = true;
-            _reloadTimer = GameConstants.ReloadTime;
+            _reloadTimer = HeroConfig?.Gun?.ReloadTime ?? GameConstants.ReloadTime;
         }
-    }
-
-    private void ProcessFire(InputFrame input)
-    {
-        if (_mainCam == null) return;
-
-        var aimRot = Quaternion.Euler(input.AimPitch, input.AimYaw, 0f);
-        var fireDir = aimRot * Vector3.forward;
-        var fireOrigin = GetFireOrigin();
-
-        // 生成弹道特效
-        if (TracerVFX.Instance != null)
-            TracerVFX.Instance.SpawnTracer(fireOrigin, fireDir);
-
-        // 枪口火焰
-        if (_playerModel != null && _playerModel.muzzleFlash != null)
-            _playerModel.muzzleFlash.Play();
-
-        // 枪声
-        if (_playerModel != null && _playerModel.fireSoundClip != null && AudioPoolManager.Instance != null)
-            AudioPoolManager.Instance.PlaySound(_playerModel.fireSoundClip, transform.position);
     }
 
     private void OnFrameReceived(AllPlayerOperation frame)
@@ -842,8 +896,8 @@ public class NetPlayerController : MonoBehaviour
     /// </summary>
     private Vector3 GetFireOrigin()
     {
-        if (_playerModel != null && _playerModel.firePoint != null)
-            return _playerModel.firePoint.position;
+        var pg = GetComponent<PistolGirlStateMachine>();
+        if (pg != null && pg.firePoint != null) return pg.firePoint.position;
         // 回退：玩家位置 + 身高 * 0.85（约胸部/枪口高度）
         return transform.position + Vector3.up * (GameConstants.PlayerHeight * 0.85f);
     }
@@ -867,17 +921,8 @@ public class NetPlayerController : MonoBehaviour
         _isDead = true;
 
         // 播放死亡动画
-        if (_playerModel != null)
-        {
-            var animancer = GetComponent<Animancer.AnimancerComponent>();
-            var animSet = GetComponent<PlayerAnimationSet>();
-            if (animSet != null && animancer != null)
-            {
-                var deathClip = animSet.GetClip(PlayerAnimType.Death);
-                if (deathClip != null)
-                    animancer.Play(deathClip, 0.2f);
-            }
-        }
+        var pgDead = GetComponent<PistolGirlStateMachine>();
+        if (pgDead != null) pgDead.PlayDeath();
 
         Debug.Log($"[NetPlayerController] 本地玩家 {PlayerId} 死亡");
     }
@@ -909,8 +954,16 @@ public class NetPlayerController : MonoBehaviour
 
     // 公开访问器
     public PlayerSnapshot CurrentSnapshot => _currentSnapshot;
+    /// <summary>上一帧构建的输入（PistolAnimationDriver 等动画系统读取）</summary>
+    public InputFrame LastInputFrame { get; private set; }
     public bool IsGrounded => _currentSnapshot.IsGrounded;
     public Vec3 Velocity => _currentSnapshot.Velocity;
+
+    /// <summary>当前总散射角（度），供准星扩散显示（BattleUI 读取）</summary>
+    public float CurrentSpreadDeg { get; private set; }
+
+    // 连发扩散热度（与服务器同语义：每次开火 += BloomPerShot，随时间 -= BloomRecover）
+    private float _bloomHeat;
     public float VerticalVelocity => _currentSnapshot.VerticalVelocity;
     public Transform Cam => _mainCam?.transform;
     public Vector3 LocalMovement => transform.position;

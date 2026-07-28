@@ -166,6 +166,65 @@ namespace ShootingGame.Shared.Protocol
             }
         }
 
+        /// <summary>
+        /// Uplink interception (参考 HYLD LZJUDP.TryScheduleBattleNetSim).
+        /// Decides whether to drop or delay an incoming packet before processing.
+        /// Returns true if intercepted (caller should skip immediate processing).
+        /// </summary>
+        public bool ShouldDelayOrDrop(PacketStrategy strategy, bool isUplink,
+            Action onDelayed, Action onDropped)
+        {
+            if (!_enabled || strategy == PacketStrategy.RouteSetup)
+                return false;
+
+            float effectiveDropRate = _dropRate;
+            int effectiveDelayMin = _delayMinMs;
+            int effectiveDelayMax = _delayMaxMs;
+
+            if (_strategyOverrides.TryGetValue(strategy, out var ovr))
+            {
+                effectiveDropRate = ovr.dropRate;
+                effectiveDelayMin = ovr.delayMin;
+                effectiveDelayMax = ovr.delayMax;
+            }
+
+            // Drop check (Control never drops)
+            if (strategy != PacketStrategy.Control && effectiveDropRate > 0)
+            {
+                if (_rng.NextDouble() < effectiveDropRate)
+                {
+                    onDropped?.Invoke();
+                    return true;
+                }
+            }
+
+            // Delay check
+            int delayMs = 0;
+            if (effectiveDelayMax > 0)
+                delayMs = effectiveDelayMin + _rng.Next(effectiveDelayMax - effectiveDelayMin + 1);
+
+            if (delayMs <= 0)
+                return false;
+
+            // Schedule delayed callback
+            long deliverAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + delayMs;
+            var capturedOnDelayed = onDelayed;
+            lock (_queueLock)
+            {
+                _delayQueue.Add(new DelayedPacket
+                {
+                    Data = null,
+                    Length = 0,
+                    Endpoint = null,
+                    DeliverAtMs = deliverAt,
+                    OnDelayedCallback = capturedOnDelayed
+                });
+                _delayQueue.Sort((a, b) => a.DeliverAtMs.CompareTo(b.DeliverAtMs));
+                Monitor.Pulse(_queueLock);
+            }
+            return true;
+        }
+
         private void EnsureSchedulerRunning()
         {
             if (_schedulerThread != null && _schedulerThread.IsAlive) return;
@@ -207,8 +266,11 @@ namespace ShootingGame.Shared.Protocol
                     _delayQueue.RemoveAt(0);
                 }
 
-                // Deliver the packet
-                _sendCallback(next.Data, next.Length, next.Endpoint);
+                // Deliver the packet (or invoke uplink callback)
+                if (next.OnDelayedCallback != null)
+                    next.OnDelayedCallback();
+                else if (next.Data != null)
+                    _sendCallback(next.Data, next.Length, next.Endpoint);
             }
         }
 
@@ -218,6 +280,7 @@ namespace ShootingGame.Shared.Protocol
             public int Length;
             public IPEndPoint Endpoint;
             public long DeliverAtMs;
+            public Action OnDelayedCallback; // For uplink interception callbacks
         }
     }
 }

@@ -12,6 +12,7 @@ namespace ShootingGame.Shared.Simulation
         public bool Aim;
         public bool Fire;
         public bool Reload;
+        public bool Crouch;
         public bool Ability1;
         public bool Ability2;
         public bool Ability3;

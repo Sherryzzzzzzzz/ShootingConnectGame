@@ -8,14 +8,15 @@ namespace ShootingGame.Server
     {
         static void Main(string[] args)
         {
-            // 初始化 GameplayTag 系统
-            GameplayTagConfig.Initialize();
-            // 初始化英雄注册表
-            ShootingGame.Shared.Hero.HeroRegistry.Initialize();
-
             int lobbyPort = 7778;
             int battlePort = 7777;
+            int playersPerMatch = 2;
+            int matchMode = 0;        // 0=团队歼灭 1=死斗(FFA)
+            int killTarget = 10;
+            float timeLimit = 300f;
             string collisionPath = null;
+            string spawnConfigPath = null;
+            string configDir = ".";
 
             // Parse arguments
             for (int i = 0; i < args.Length; i++)
@@ -26,7 +27,27 @@ namespace ShootingGame.Server
                     int.TryParse(args[++i], out battlePort);
                 else if (args[i] == "--collision" && i + 1 < args.Length)
                     collisionPath = args[++i];
+                else if (args[i] == "--spawn-config" && i + 1 < args.Length)
+                    spawnConfigPath = args[++i];
+                else if (args[i] == "--config-dir" && i + 1 < args.Length)
+                    configDir = args[++i];
+                else if (args[i] == "--players" && i + 1 < args.Length)
+                    int.TryParse(args[++i], out playersPerMatch);
+                else if (args[i] == "--mode" && i + 1 < args.Length)
+                    matchMode = args[++i].Equals("deathmatch", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+                else if (args[i] == "--kill-target" && i + 1 < args.Length)
+                    int.TryParse(args[++i], out killTarget);
+                else if (args[i] == "--time-limit" && i + 1 < args.Length)
+                    float.TryParse(args[++i], out timeLimit);
             }
+
+            // 从 JSON 加载英雄/枪械/技能配置（Unity 编辑器 GameConfigExporter 导出，双端单一数据源）
+            var heroConfigs = GameConfigLoader.LoadAll(configDir);
+
+            // 初始化 GameplayTag 系统
+            GameplayTagConfig.Initialize();
+            // 初始化英雄注册表（JSON 优先，缺失时回退硬编码默认）
+            ShootingGame.Shared.Hero.HeroRegistry.Initialize(heroConfigs);
 
             Console.WriteLine("========================================");
             Console.WriteLine("  ShootingGame Server");
@@ -36,9 +57,19 @@ namespace ShootingGame.Server
             Console.WriteLine("========================================");
 
             // Create components
-            var matchMaker = new MatchMaker(playersPerMatch: 2, teamsPerMatch: 2);
+            var matchMaker = new MatchMaker(playersPerMatch: playersPerMatch, teamsPerMatch: 2);
+            matchMaker.SetMatchMode(matchMode, killTarget, timeLimit);
+            Console.WriteLine($"Mode: {(matchMode == 1 ? $"Deathmatch (kill target {killTarget}, time limit {timeLimit}s)" : "Team Elimination")}, Players per match: {playersPerMatch}");
             if (!string.IsNullOrEmpty(collisionPath))
                 matchMaker.SetCollisionDataPath(collisionPath);
+
+            // Load spawn point configuration (aligns with client scene SpawnPoints)
+            if (!string.IsNullOrEmpty(spawnConfigPath))
+            {
+                var spawnPoints = SpawnPointConfig.Load(spawnConfigPath);
+                if (spawnPoints != null)
+                    matchMaker.SetSpawnPoints(spawnPoints);
+            }
             var lobbyServer = new LobbyServer(lobbyPort, matchMaker);
             var battleUdpServer = new BattleUdpServer(battlePort);
             var roomManager = new RoomManager(matchMaker, lobbyServer);

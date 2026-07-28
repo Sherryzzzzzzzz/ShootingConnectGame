@@ -109,6 +109,17 @@ public class HitEventManager : MonoBehaviour
             hitFeedbackUI.ShowHitFeedback(hitEvent);
         }
 
+        // 远程玩家射击动画：找到攻击者的 RemotePlayerController，触发 FireTrigger
+        if (BattleManager.Instance != null)
+        {
+            var remotePlayers = BattleManager.Instance.RemotePlayers;
+            if (remotePlayers.TryGetValue(hitEvent.AttackerId, out var remoteGo) && remoteGo != null)
+            {
+                var rpc = remoteGo.GetComponent<RemotePlayerController>();
+                if (rpc != null) rpc.FireTrigger = true;
+            }
+        }
+
         // Fire event for subscribers (like BattleUI)
         OnHitEvent?.Invoke(hitEvent);
 

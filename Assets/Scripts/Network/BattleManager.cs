@@ -5,6 +5,7 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using Unity.Cinemachine;
 using ShootingGame.Shared.Hero;
+using ShootingGame.Shared.Physics;
 using ShootingGame.Shared.Protocol;
 using ShootingGame.Shared.Simulation;
 
@@ -51,6 +52,7 @@ public class BattleManager : MonoBehaviour
     public int LocalPlayerId => _localBattlePlayerId;
     public int LocalTeamId => _localTeamId;
     public bool IsInBattle => _state == BattleState.Playing;
+    public IReadOnlyDictionary<int, GameObject> RemotePlayers => _remotePlayers;
 
     // 事件
     public event Action OnMatchingStart;
@@ -480,22 +482,6 @@ public class BattleManager : MonoBehaviour
     }
 
     /// <summary>
-    /// 延迟一帧重新初始化状态机。PlayerModel.Start() 在 Instantiate 时已执行，
-    /// 当时 NetPlayerController 还未添加。这里等 NetPlayerController.Start() 完成后重新刷新状态引用。
-    /// </summary>
-    private IEnumerator ReinitStateMachinesNextFrame(PlayerModel model)
-    {
-        yield return null;  // 等 NetPlayerController.Start() 执行
-        yield return null;  // 再等一帧确保所有组件就绪
-
-        if (model != null)
-        {
-            // 使用 ReinitCurrentStates 而不是重新进入状态，因为当前状态是 idle/ground，
-            // EnterState 检测到相同状态会直接 return，不会重新调用 Init
-            model.ReinitCurrentStates();
-            Debug.Log("[BattleManager] 状态机重新初始化完成（当前状态引用已刷新）");
-        }
-    }
 
     private void OnBattleStartReceived()
     {
@@ -609,13 +595,20 @@ public class BattleManager : MonoBehaviour
             Destroy(scenePlayer);
         }
 
-        if (localPlayerPrefab != null)
+        // 优先使用英雄配置的 HeroPrefab（如 PistolGirl_Player），没有则用默认 Player
+        var prefabToUse = (heroConfig != null && heroConfig.HeroPrefab != null)
+            ? heroConfig.HeroPrefab
+            : localPlayerPrefab;
+        Debug.Log($"[BattleManager] SpawnLocalPlayer: heroConfig.HeroPrefab={(heroConfig?.HeroPrefab != null ? heroConfig.HeroPrefab.name : "NULL")} → using prefab: {(prefabToUse != null ? prefabToUse.name : "NULL")}");
+        if (prefabToUse != null)
         {
-            _localPlayer = Instantiate(localPlayerPrefab, position, Quaternion.identity);
+            _localPlayer = Instantiate(prefabToUse, position, Quaternion.identity);
             _localPlayer.name = $"LocalPlayer_{_localBattlePlayerId}";
 
             // 禁用物理碰撞体，防止玩家之间产生碰撞"吸附"
             DisablePhysicsComponents(_localPlayer);
+
+            // 更新 PG 状态机的 capsule 引用（根 Collider 不再被 Destroy，引用仍然有效）
 
             // 禁用预制体自带的摄像机（使用场景中的 CinemachineFreeLook 替代）
             DisableAllCameras(_localPlayer);
@@ -627,6 +620,25 @@ public class BattleManager : MonoBehaviour
                 _localPlayer.AddComponent<BodyPartHitbox>();
                 Debug.Log("[BattleManager] 为本地玩家添加 BodyPartHitbox");
             }
+
+            // 确保 PistolGirlStateMachine + AnimancerComponent 存在
+            if (_localPlayer.GetComponent<Animancer.AnimancerComponent>() == null)
+                _localPlayer.AddComponent<Animancer.AnimancerComponent>();
+            // Animancer 驱动 Body 上的 Animator
+            var bodyAnim = _localPlayer.GetComponentInChildren<Animator>(true);
+            if (bodyAnim != null)
+            {
+                _localPlayer.GetComponent<Animancer.AnimancerComponent>().Animator = bodyAnim;
+                bodyAnim.runtimeAnimatorController = null; // 先清空 Controller，防止默认状态（如 Death）被播放
+                bodyAnim.applyRootMotion = false;
+                bodyAnim.enabled = true;
+                Debug.Log($"[BattleManager] Body Animator: enabled={bodyAnim.enabled}, avatar={bodyAnim.avatar != null}, hasController={bodyAnim.runtimeAnimatorController != null}");
+            }
+            var pg = _localPlayer.GetComponent<PistolGirlStateMachine>();
+            if (pg == null) pg = _localPlayer.AddComponent<PistolGirlStateMachine>();
+            pg.animSet = Resources.Load<PlayerAnimationSet>("PistolGirl_AnimSet");
+            pg.capsule = _localPlayer.GetComponent<CapsuleCollider>();
+            Debug.Log("[BattleManager] PG 已配置: animSet=" + (pg.animSet != null) + " bodyAnim=" + (bodyAnim != null));
 
             var controller = _localPlayer.GetComponent<NetPlayerController>();
             if (controller == null)
@@ -652,22 +664,12 @@ public class BattleManager : MonoBehaviour
                 controller.RefreshCamera();
             }
 
-            // 检测 PlayerModel
-            var playerModel = _localPlayer.GetComponent<PlayerModel>();
-            if (playerModel == null)
-                playerModel = _localPlayer.GetComponentInChildren<PlayerModel>();
+            // 应用选角界面的外观选择
+            HeroAppearanceApplier.Apply(_localPlayer,
+                CharacterSelectUI.SelectedOutfitIndex,
+                CharacterSelectUI.SelectedGunColor);
 
-            if (playerModel != null)
-            {
-                playerModel.isLocalPlayer = true;
-                StartCoroutine(ReinitStateMachinesNextFrame(playerModel));
-            }
-            else
-            {
-                Debug.LogError("[BattleManager] ❌ 预制体缺少 PlayerModel！请在 Player 预制体上添加 PlayerModel 组件。");
-            }
-
-            Debug.Log($"[BattleManager] 生成本地玩家: {_localPlayer.name}, PlayerId={_localBattlePlayerId}, isLocalPlayer={playerModel?.isLocalPlayer}, 位置: {position}");
+            Debug.Log($"[BattleManager] 生成本地玩家: {_localPlayer.name}, PlayerId={_localBattlePlayerId}, 位置: {position}");
             return;
         }
 
@@ -679,9 +681,7 @@ public class BattleManager : MonoBehaviour
             _localPlayer.name = $"LocalPlayer_{_localBattlePlayerId}";
             existingController.transform.position = position;
             existingController.RefreshCamera();
-            var pm = existingController.GetComponent<PlayerModel>();
-            if (pm == null) pm = existingController.GetComponentInChildren<PlayerModel>();
-            if (pm != null) pm.isLocalPlayer = true;
+
             Debug.Log($"[BattleManager] 使用场景中已有的本地玩家，位置: {position}");
             return;
         }
@@ -702,19 +702,6 @@ public class BattleManager : MonoBehaviour
         // 添加角色控制器所需的组件
         var controller = go.AddComponent<NetPlayerController>();
 
-        // 如果场景中有 PlayerModel，从现有 Player 复制设置
-        var existingPlayer = FindFirstObjectByType<PlayerModel>();
-        if (existingPlayer != null)
-        {
-            // 使用现有 Player 的 PlayerModel（更复杂的设置，如相机、动画等）
-            _localPlayer = existingPlayer.gameObject;
-            existingPlayer.transform.position = position;
-            existingPlayer.isLocalPlayer = true;
-            _localPlayer.name = $"LocalPlayer_{_localBattlePlayerId}";
-            UnityEngine.Object.Destroy(go); // 销毁刚创建的基础对象
-            Debug.Log($"[BattleManager] 复用场景 PlayerModel 作为本地玩家，位置: {position}");
-            return _localPlayer;
-        }
 
         // 添加基础可视表示
         var capsule = GameObject.CreatePrimitive(PrimitiveType.Capsule);
@@ -738,10 +725,17 @@ public class BattleManager : MonoBehaviour
             return;
         }
 
-        if (remotePlayerPrefab != null)
+        var prefabToUse = (heroConfig != null && heroConfig.HeroPrefab != null)
+            ? heroConfig.HeroPrefab
+            : remotePlayerPrefab;
+        if (prefabToUse != null)
         {
-            var go = Instantiate(remotePlayerPrefab, position, Quaternion.identity);
+            var go = Instantiate(prefabToUse, position, Quaternion.identity);
             go.name = $"RemotePlayer_{playerId}";
+
+            // 远程玩家不能有 NetPlayerController（预制体自带的必须禁用，否则会和本地玩家抢输入）
+            var remoteNpc = go.GetComponent<NetPlayerController>();
+            if (remoteNpc != null) { remoteNpc.enabled = false; Debug.Log($"[BattleManager] 禁用 RemotePlayer_{playerId} 上的 NetPlayerController"); }
 
             // 禁用物理碰撞体，防止玩家之间产生碰撞"吸附"
             DisablePhysicsComponents(go);
@@ -765,13 +759,25 @@ public class BattleManager : MonoBehaviour
 
             controller.Initialize(playerId, teamId, position, heroConfig);
 
-            var playerModel = go.GetComponent<PlayerModel>();
-            if (playerModel == null)
-                playerModel = go.GetComponentInChildren<PlayerModel>();
-            if (playerModel != null)
+            // 远程玩家：确保 Animancer + PistolAnimationDriver（从 AnimSet 读动画）
+            var remoteAnim = go.GetComponentInChildren<Animator>(true);
+            if (remoteAnim != null)
             {
-                playerModel.isLocalPlayer = false;
+                remoteAnim.runtimeAnimatorController = null; // 先清空 Controller，防止默认状态闪现
+                remoteAnim.applyRootMotion = false;
+                remoteAnim.enabled = true; // PistolGirlStateMachine.Awake 关掉了，必须重新打开
+                var remoteAnimancer = go.GetComponent<Animancer.AnimancerComponent>();
+                if (remoteAnimancer == null)
+                    remoteAnimancer = go.AddComponent<Animancer.AnimancerComponent>();
+                remoteAnimancer.Animator = remoteAnim;
+                if (go.GetComponent<PistolAnimationDriver>() == null)
+                    go.AddComponent<PistolAnimationDriver>();
             }
+
+
+
+            // TODO: 远程玩家外观需要从网络同步（对方的 outfitIndex / gunColor）
+            // 当前远程玩家使用默认外观
 
             _remotePlayers[playerId] = go;
             Debug.Log($"[BattleManager] 从预制体生成远程玩家 {playerId}，位置: {position}");
@@ -819,38 +825,79 @@ public class BattleManager : MonoBehaviour
 
     private Vector3 GetSpawnPosition(int playerId, int teamId)
     {
+        var world = CollisionWorldLoader.Instance;
+        var candidates = new List<Vector3>();
+
         // 优先使用服务器下发的出生点（BattleInfo.SpawnPoints）
         if (_battleInfo != null && _battleInfo.SpawnPoints != null && _battleInfo.SpawnPoints.Count > 0)
         {
-            // 先找队伍专属出生点
-            var teamSpawns = new List<SpawnPointMsg>();
-            var anySpawns = new List<SpawnPointMsg>();
             foreach (var sp in _battleInfo.SpawnPoints)
             {
-                if (sp.TeamId == teamId) teamSpawns.Add(sp);
-                else if (sp.TeamId == 0) anySpawns.Add(sp);
-            }
-
-            var pool = teamSpawns.Count > 0 ? teamSpawns : (anySpawns.Count > 0 ? anySpawns : null);
-            if (pool != null)
-            {
-                var sp = pool[playerId % pool.Count];
-                return new Vector3(sp.Position.x, sp.Position.y, sp.Position.z);
+                if (sp.TeamId == teamId || sp.TeamId == 0)
+                    candidates.Add(new Vector3(sp.Position.x, sp.Position.y, sp.Position.z));
             }
         }
 
-        // Fallback 1: Inspector 中配置的 Transform[]
-        if (spawnPoints != null && spawnPoints.Length > 0)
+        // Fallback 1: SpawnPoints.json
+        if (candidates.Count == 0)
         {
-            int index = playerId % spawnPoints.Length;
-            if (spawnPoints[index] != null)
-                return spawnPoints[index].position;
+            try
+            {
+                var cfg = Resources.Load<TextAsset>("SpawnPoints");
+                if (cfg != null)
+                {
+                    var wrapper = JsonUtility.FromJson<SpawnPointsWrapper>(cfg.text);
+                    if (wrapper?.spawnPoints?.Count > 0)
+                    {
+                        foreach (var sp in wrapper.spawnPoints)
+                            candidates.Add(new Vector3(sp.x, sp.y, sp.z));
+                    }
+                }
+            }
+            catch { }
         }
 
-        // Fallback 2: 基于队伍ID的默认位置
+        // Fallback 2: Inspector Transform[]
+        if (candidates.Count == 0 && spawnPoints != null)
+        {
+            foreach (var t in spawnPoints)
+                if (t != null) candidates.Add(t.position);
+        }
+
+        if (candidates.Count > 0)
+        {
+            // 打乱顺序后逐个检查合法性，选第一个合法的
+            Shuffle(candidates);
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                if (SpawnValidator.IsSpawnValid(candidates[i], world))
+                {
+                    Debug.Log($"[Spawn] Player {playerId} → 合法出生点 ({candidates[i].x:F1},{candidates[i].z:F1}) idx={i}/{candidates.Count}");
+                    return candidates[i];
+                }
+            }
+
+            // 全部不合法 → 从随机一个出发螺旋搜索最近合法点
+            var fallback = candidates[0];
+            Debug.LogWarning($"[Spawn] Player {playerId}: {candidates.Count} 个预设出生点全部不合法，从 ({fallback.x:F1},{fallback.z:F1}) 开始搜索...");
+            return SpawnValidator.FindNearestValidSpawn(fallback, world);
+        }
+
+        // 最终回退
         float x = (teamId == 1) ? -5f : 5f;
         float z = playerId * 2f;
-        return new Vector3(x, 0.1f, z);
+        var finalFallback = new Vector3(x, 0.1f, z);
+        return world != null ? SpawnValidator.FindNearestValidSpawn(finalFallback, world) : finalFallback;
+    }
+
+    /// <summary>Fisher-Yates shuffle</summary>
+    private static void Shuffle<T>(System.Collections.Generic.IList<T> list)
+    {
+        for (int i = list.Count - 1; i > 0; i--)
+        {
+            int j = UnityEngine.Random.Range(0, i + 1);
+            (list[i], list[j]) = (list[j], list[i]);
+        }
     }
 
     #endregion
@@ -939,12 +986,13 @@ public class BattleManager : MonoBehaviour
             Debug.Log($"[BattleManager] 销毁 CharacterController on {go.name}");
         }
 
-        // 禁用所有 Collider（胶囊体、盒子等），包括子对象
+        // 禁用子对象上的 Collider（保留根上的 CapsuleCollider，蹲伏/角色碰撞需要它）
         var colliders = go.GetComponentsInChildren<Collider>(includeInactive: true);
         foreach (var col in colliders)
         {
+            if (col.gameObject == go) continue; // 保留根 GameObject 上的
             UnityEngine.Object.Destroy(col);
-            Debug.Log($"[BattleManager] 销毁 Collider ({col.GetType().Name}) on {col.gameObject.name}");
+            Debug.Log($"[BattleManager] 销毁子 Collider ({col.GetType().Name}) on {col.gameObject.name}");
         }
 
         // 禁用/销毁所有 Rigidbody（包括子对象）
@@ -998,28 +1046,15 @@ public class BattleManager : MonoBehaviour
     /// </summary>
     private void SetupFreeLookCamera(GameObject localPlayer)
     {
-        var freeLooks = FindObjectsOfType<CinemachineFreeLook>();
-
-        if (freeLooks.Length == 0)
+        var allCams = FindObjectsOfType<CinemachineFreeLook>(true);
+        foreach (var cam in allCams)
         {
-            Debug.LogWarning("[BattleManager] ⚠ 场景中没有 CinemachineFreeLook！将自动创建默认 FreeLook Camera。");
-            CreateDefaultFreeLookCamera(localPlayer);
-            return;
+            cam.Follow = localPlayer.transform;
+            cam.LookAt = localPlayer.transform;
+            Debug.Log($"[BattleManager] Camera '{cam.name}' Follow/LookAt → {localPlayer.name}");
         }
-
-        // 只改 Follow/LookAt，不动任何其他参数
-        var freeLook = freeLooks[0];
-        freeLook.Follow = localPlayer.transform;
-        freeLook.LookAt = localPlayer.transform;
-
-        // 将 FreeLook 所在的 Camera 标记为 MainCamera
-        var freeLookCamera = freeLook.GetComponentInChildren<Camera>();
-        if (freeLookCamera != null && freeLookCamera.CompareTag("MainCamera") == false)
-        {
-            freeLookCamera.tag = "MainCamera";
-        }
-
-        Debug.Log($"[BattleManager] FreeLook 已关联: Follow={localPlayer.name}, Camera={freeLook.name}");
+        if (allCams.Length == 0)
+            Debug.LogWarning("[BattleManager] 场景中无 CinemachineFreeLook");
     }
 
     /// <summary>
@@ -1091,4 +1126,9 @@ public class BattleManager : MonoBehaviour
     }
 
     #endregion
+
+    [System.Serializable]
+    private class SpawnPointsWrapper { public List<SpawnEntry> spawnPoints; }
+    [System.Serializable]
+    private class SpawnEntry { public float x; public float y; public float z; public float yaw; public int teamId; }
 }

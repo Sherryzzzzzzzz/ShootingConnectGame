@@ -77,6 +77,25 @@ public class ClientECSWorld : MonoBehaviour
                 hp.Current = heroConfig.MaxHP;
                 _entityManager.SetComponent(entity, hp);
             }
+
+            // 枪械参数：弹夹、射速、换弹时长
+            var gun = heroConfig.Gun ?? ShootingGame.Shared.Hero.GunRegistry.GetGun(heroConfig.StartingGunId);
+            if (gun != null && _entityManager.TryGetComponent<AmmoComponent>(entity, out var ammo))
+            {
+                ammo.Max = gun.ClipSize;
+                ammo.Current = gun.ClipSize;
+                _entityManager.SetComponent(entity, ammo);
+            }
+            if (gun != null && _entityManager.TryGetComponent<FireCooldownComponent>(entity, out var fc))
+            {
+                fc.Rate = gun.FireRate;
+                _entityManager.SetComponent(entity, fc);
+            }
+            if (gun != null && _entityManager.TryGetComponent<ReloadComponent>(entity, out var rc))
+            {
+                rc.Duration = gun.ReloadTime;
+                _entityManager.SetComponent(entity, rc);
+            }
         }
         else
         {

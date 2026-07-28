@@ -2,7 +2,8 @@
     "name": "ShootingGame.Shared.Hero",
     "rootNamespace": "ShootingGame.Shared.Hero",
     "references": [
-        "ShootingGame.Shared.Ability"
+        "ShootingGame.Shared.Ability",
+        "ShootingGame.Shared.Math"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

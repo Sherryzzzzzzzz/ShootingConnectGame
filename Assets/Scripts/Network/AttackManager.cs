@@ -62,6 +62,9 @@ public class AttackManager : MonoBehaviour
             _fireCooldown -= Time.deltaTime;
     }
 
+    /// <summary>射击间隔（秒），默认 GameConstants.FireRate；战斗开始时按英雄枪械设置</summary>
+    public float FireInterval = GameConstants.FireRate;
+
     /// <summary>
     /// Try to create a new attack (respects fire rate).
     /// </summary>
@@ -101,8 +104,8 @@ public class AttackManager : MonoBehaviour
             ResendAttempts = 0
         };
 
-        // Set cooldown
-        _fireCooldown = GameConstants.FireRate;
+        // Set cooldown（枪械射速驱动，由 NetPlayerController 在战斗开始时按英雄枪械设置）
+        _fireCooldown = FireInterval;
         _lastFireTime = Time.unscaledTime;
 
         Debug.Log($"[AttackManager] Created attack {attackId} at frame {clientFrameId}");

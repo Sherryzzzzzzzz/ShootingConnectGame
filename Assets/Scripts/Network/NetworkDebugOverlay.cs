@@ -71,7 +71,7 @@ public class NetworkDebugOverlay : MonoBehaviour
 
         // 同步远程玩家列表：添加新玩家，移除断开玩家，更新实时数据
         var currentIds = new HashSet<int>();
-        foreach (var kvp in RemotePlayerController.AllRemotePlayers)
+        foreach (var kvp in RemotePlayerController.All)
         {
             var ctrl = kvp.Value;
             int id = ctrl.PlayerId;

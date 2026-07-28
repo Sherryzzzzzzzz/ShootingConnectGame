@@ -62,9 +62,10 @@ public class LobbyPanel : MonoBehaviour
         if (refreshRoomsButton != null) refreshRoomsButton.onClick.AddListener(OnRefreshRoomsClick);
         if (createRoomButton != null) createRoomButton.onClick.AddListener(OnCreateRoomClick);
         if (leaveRoomButton != null) leaveRoomButton.onClick.AddListener(OnLeaveRoomClick);
-        if (selectSoldierButton != null) selectSoldierButton.onClick.AddListener(() => SelectHero(1));
-        if (selectTankButton != null) selectTankButton.onClick.AddListener(() => SelectHero(2));
-        if (selectSniperButton != null) selectSniperButton.onClick.AddListener(() => SelectHero(3));
+        if (selectSoldierButton != null) selectSoldierButton.onClick.AddListener(() => SelectHeroByIndex(0));
+        if (selectTankButton != null) selectTankButton.onClick.AddListener(() => SelectHeroByIndex(1));
+        if (selectSniperButton != null) selectSniperButton.onClick.AddListener(() => SelectHeroByIndex(2));
+        RefreshHeroButtons();
     }
 
     private void OnEnable()
@@ -349,8 +350,40 @@ public class LobbyPanel : MonoBehaviour
         _selectedHeroId = heroId;
         var hero = ShootingGame.Shared.Hero.HeroRegistry.GetHero(heroId);
         string heroName = hero != null ? hero.Name : "Unknown";
-        if (selectedHeroText != null)
+        if (selectedHeroText != null && hero != null)
             selectedHeroText.text = $"已选择: {heroName} (HP:{hero.MaxHP} 速度:{hero.MoveSpeed})";
+    }
+
+    /// <summary>按英雄列表序号选择（大厅按钮是数据驱动的，不再硬编码 heroId）</summary>
+    private void SelectHeroByIndex(int index)
+    {
+        var heroes = ShootingGame.Shared.Hero.HeroRegistry.GetAllHeroes();
+        if (index >= 0 && index < heroes.Count)
+            SelectHero(heroes[index].HeroId);
+    }
+
+    /// <summary>把大厅三个英雄按钮重绑定到 HeroRegistry 的实际英雄（图标/名字数据驱动）</summary>
+    private void RefreshHeroButtons()
+    {
+        var heroes = ShootingGame.Shared.Hero.HeroRegistry.GetAllHeroes();
+        var buttons = new[] { selectSoldierButton, selectTankButton, selectSniperButton };
+        for (int i = 0; i < buttons.Length; i++)
+        {
+            if (buttons[i] == null) continue;
+            if (i < heroes.Count)
+            {
+                var label = buttons[i].GetComponentInChildren<TMP_Text>();
+                if (label != null) label.text = heroes[i].Name;
+                buttons[i].gameObject.SetActive(true);
+            }
+            else
+            {
+                // 英雄不足 3 个时隐藏多余按钮
+                buttons[i].gameObject.SetActive(false);
+            }
+        }
+        // 默认选中第一个英雄
+        if (heroes.Count > 0) SelectHero(heroes[0].HeroId);
     }
 
     private void OnLeaveQueueClick()

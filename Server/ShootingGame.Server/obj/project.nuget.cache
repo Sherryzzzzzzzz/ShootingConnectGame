@@ -1,14 +1,14 @@
 {
   "version": 2,
-  "dgSpecHash": "kMuv4TtnCow=",
+  "dgSpecHash": "OGEpnsNBMLk=",
   "success": true,
   "projectFilePath": "F:\\GithubProject\\ShootingConnectGame\\Server\\ShootingGame.Server\\ShootingGame.Server.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\yxc\\.nuget\\packages\\google.protobuf\\3.28.3\\google.protobuf.3.28.3.nupkg.sha512",
-    "C:\\Users\\yxc\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.27\\microsoft.netcore.app.ref.8.0.27.nupkg.sha512",
-    "C:\\Users\\yxc\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.27\\microsoft.windowsdesktop.app.ref.8.0.27.nupkg.sha512",
-    "C:\\Users\\yxc\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.27\\microsoft.aspnetcore.app.ref.8.0.27.nupkg.sha512",
-    "C:\\Users\\yxc\\.nuget\\packages\\microsoft.netcore.app.host.win-x64\\8.0.27\\microsoft.netcore.app.host.win-x64.8.0.27.nupkg.sha512"
+    "C:\\Users\\yxc\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.28\\microsoft.netcore.app.ref.8.0.28.nupkg.sha512",
+    "C:\\Users\\yxc\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.28\\microsoft.windowsdesktop.app.ref.8.0.28.nupkg.sha512",
+    "C:\\Users\\yxc\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.28\\microsoft.aspnetcore.app.ref.8.0.28.nupkg.sha512",
+    "C:\\Users\\yxc\\.nuget\\packages\\microsoft.netcore.app.host.win-x64\\8.0.28\\microsoft.netcore.app.host.win-x64.8.0.28.nupkg.sha512"
   ],
   "logs": []
 }

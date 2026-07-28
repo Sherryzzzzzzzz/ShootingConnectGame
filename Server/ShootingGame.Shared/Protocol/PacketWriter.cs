@@ -142,5 +142,25 @@ namespace ShootingGame.Shared.Protocol
             WriteFloat(q.z);
             WriteFloat(q.w);
         }
+
+        /// <summary>
+        /// 写入原始字节数组。
+        /// </summary>
+        public void WriteBytes(byte[] data)
+        {
+            if (data == null || data.Length == 0) return;
+            WriteBytes(data, 0, data.Length);
+        }
+
+        /// <summary>
+        /// 写入原始字节数组。
+        /// </summary>
+        public void WriteBytes(byte[] data, int offset, int count)
+        {
+            if (data == null || count <= 0) return;
+            EnsureCapacity(count);
+            Buffer.BlockCopy(data, offset, _buffer, _pos, count);
+            _pos += count;
+        }
     }
 }

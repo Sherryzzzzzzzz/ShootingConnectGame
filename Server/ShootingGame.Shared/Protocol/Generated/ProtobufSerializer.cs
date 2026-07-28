@@ -54,6 +54,13 @@ namespace ShootingGame.Shared.Protocol
                 foreach (var bp in pack.BattlePlayerPacks)
                     SerializeSubMessage(cos, 11, subCos => SerializeBattlePlayerPack(subCos, bp));
             }
+            if (pack.RpcPayload != null && pack.RpcPayload.Length > 0)
+                cos.WriteBytesTag(12).WriteBytes(Google.Protobuf.ByteString.CopyFrom(pack.RpcPayload));
+            if (pack.ScoreEntries != null)
+            {
+                foreach (var se in pack.ScoreEntries)
+                    SerializeSubMessage(cos, 13, subCos => SerializeScoreEntryMsg(subCos, se));
+            }
 
             cos.Flush();
             return ms.ToArray();
@@ -105,9 +112,41 @@ namespace ShootingGame.Shared.Protocol
                         pack.BattlePlayerPacks.Add(DeserializeBattlePlayerPack(subCis));
                         break;
                     }
+                    case 12: pack.RpcPayload = cis.ReadBytes().ToByteArray(); break;
+                    case 13:
+                    {
+                        var subCis = cis.ReadMessage();
+                        pack.ScoreEntries.Add(DeserializeScoreEntryMsg(subCis));
+                        break;
+                    }
                 }
             }
             return pack;
+        }
+
+        private static void SerializeScoreEntryMsg(CodedOutputStream cos, ScoreEntryMsg se)
+        {
+            if (se.PlayerId != 0) cos.WriteInt32Tag(1).WriteInt32(se.PlayerId);
+            if (!string.IsNullOrEmpty(se.PlayerName)) cos.WriteStringTag(2).WriteString(se.PlayerName);
+            if (se.Kills != 0) cos.WriteInt32Tag(3).WriteInt32(se.Kills);
+            if (se.Deaths != 0) cos.WriteInt32Tag(4).WriteInt32(se.Deaths);
+            cos.Flush();
+        }
+
+        private static ScoreEntryMsg DeserializeScoreEntryMsg(CodedInputStream cis)
+        {
+            var se = new ScoreEntryMsg();
+            while (cis.ReadTag(out uint tag))
+            {
+                switch (tag >> 3)
+                {
+                    case 1: se.PlayerId = cis.ReadInt32(); break;
+                    case 2: se.PlayerName = cis.ReadString(); break;
+                    case 3: se.Kills = cis.ReadInt32(); break;
+                    case 4: se.Deaths = cis.ReadInt32(); break;
+                }
+            }
+            return se;
         }
 
         /// <summary>Write a full MainPack including 4-byte big-endian length prefix (TCP frame format).</summary>
@@ -358,6 +397,13 @@ namespace ShootingGame.Shared.Protocol
             if (op.Run) cos.WriteBoolTag(11).WriteBool(op.Run);
             if (op.Aim) cos.WriteBoolTag(12).WriteBool(op.Aim);
             if (op.Reload) cos.WriteBoolTag(13).WriteBool(op.Reload);
+            // 客户端预测位置（字段 15-20）
+            if (op.PosX != 0) cos.WriteFloatTag(15).WriteFloat(op.PosX);
+            if (op.PosY != 0) cos.WriteFloatTag(16).WriteFloat(op.PosY);
+            if (op.PosZ != 0) cos.WriteFloatTag(17).WriteFloat(op.PosZ);
+            if (op.VelX != 0) cos.WriteFloatTag(18).WriteFloat(op.VelX);
+            if (op.VelZ != 0) cos.WriteFloatTag(19).WriteFloat(op.VelZ);
+            if (op.IsGrounded) cos.WriteBoolTag(20).WriteBool(op.IsGrounded);
             if (op.AbilityEvents != null)
             {
                 foreach (var evt in op.AbilityEvents)
@@ -391,12 +437,19 @@ namespace ShootingGame.Shared.Protocol
                     case 11: op.Run = cis.ReadBool(); break;
                     case 12: op.Aim = cis.ReadBool(); break;
                     case 13: op.Reload = cis.ReadBool(); break;
+                    case 24: op.Crouch = cis.ReadBool(); break;
                     case 14:
                     {
                         var subCis = cis.ReadMessage();
                         op.AbilityEvents.Add(DeserializeAbilityEvent(subCis));
                         break;
                     }
+                    case 15: op.PosX = cis.ReadFloat(); break;
+                    case 16: op.PosY = cis.ReadFloat(); break;
+                    case 17: op.PosZ = cis.ReadFloat(); break;
+                    case 18: op.VelX = cis.ReadFloat(); break;
+                    case 19: op.VelZ = cis.ReadFloat(); break;
+                    case 20: op.IsGrounded = cis.ReadBool(); break;
                 }
             }
             return op;
@@ -522,6 +575,8 @@ namespace ShootingGame.Shared.Protocol
             if (ps.FireCooldown != 0) cos.WriteFloatTag(8).WriteFloat(ps.FireCooldown);
             if (ps.RotationY != 0) cos.WriteFloatTag(9).WriteFloat(ps.RotationY);
             if (ps.IsRunning) cos.WriteBoolTag(10).WriteBool(ps.IsRunning);
+            if (ps.IsAiming) cos.WriteBoolTag(19).WriteBool(ps.IsAiming);
+            if (ps.IsCrouching) cos.WriteBoolTag(25).WriteBool(ps.IsCrouching);
             if (ps.CurrentAmmo != 0) cos.WriteInt32Tag(11).WriteInt32(ps.CurrentAmmo);
             if (ps.IsReloading) cos.WriteBoolTag(12).WriteBool(ps.IsReloading);
             if (ps.VerticalVelocity != 0) cos.WriteFloatTag(15).WriteFloat(ps.VerticalVelocity);
@@ -532,6 +587,8 @@ namespace ShootingGame.Shared.Protocol
                     SerializeSubMessage(cos, 14, subCos => SerializeAbilityInstance(subCos, ab));
             }
             if (ps.MaxHp != 0) cos.WriteInt32Tag(16).WriteInt32(ps.MaxHp);
+            if (ps.Kills != 0) cos.WriteInt32Tag(17).WriteInt32(ps.Kills);
+            if (ps.Deaths != 0) cos.WriteInt32Tag(18).WriteInt32(ps.Deaths);
             cos.Flush();
         }
 
@@ -552,6 +609,8 @@ namespace ShootingGame.Shared.Protocol
                     case 8: ps.FireCooldown = cis.ReadFloat(); break;
                     case 9: ps.RotationY = cis.ReadFloat(); break;
                     case 10: ps.IsRunning = cis.ReadBool(); break;
+                    case 19: ps.IsAiming = cis.ReadBool(); break;
+                    case 25: ps.IsCrouching = cis.ReadBool(); break;
                     case 11: ps.CurrentAmmo = cis.ReadInt32(); break;
                     case 12: ps.IsReloading = cis.ReadBool(); break;
                     case 13: ps.TagBitmask = cis.ReadInt64(); break;
@@ -564,6 +623,8 @@ namespace ShootingGame.Shared.Protocol
                     }
                     case 15: ps.VerticalVelocity = cis.ReadFloat(); break;
                     case 16: ps.MaxHp = cis.ReadInt32(); break;
+                    case 17: ps.Kills = cis.ReadInt32(); break;
+                    case 18: ps.Deaths = cis.ReadInt32(); break;
                 }
             }
             return ps;
@@ -583,6 +644,7 @@ namespace ShootingGame.Shared.Protocol
             if (he.HitPoint.x != 0 || he.HitPoint.y != 0 || he.HitPoint.z != 0)
                 SerializeSubMessage(cos, 6, subCos => SerializeVec3(subCos, he.HitPoint));
             if (he.HitFrameId != 0) cos.WriteInt32Tag(7).WriteInt32(he.HitFrameId);
+            if (he.BodyPart != 0) cos.WriteInt32Tag(8).WriteInt32(he.BodyPart);
             cos.Flush();
         }
 
@@ -600,6 +662,7 @@ namespace ShootingGame.Shared.Protocol
                     case 5: he.IsKill = cis.ReadBool(); break;
                     case 6: { var subCis = cis.ReadMessage(); he.HitPoint = DeserializeVec3(subCis); break; }
                     case 7: he.HitFrameId = cis.ReadInt32(); break;
+                    case 8: he.BodyPart = cis.ReadInt32(); break;
                 }
             }
             return he;
@@ -687,6 +750,11 @@ namespace ShootingGame.Shared.Protocol
                 case GameMessageType.AbilityEvent:
                     SerializeSubMessage(cos, 19, subCos => SerializeAbilityEvent(subCos, msg.AbilityEvent));
                     break;
+                case GameMessageType.DeltaState:
+                case GameMessageType.RpcCall:
+                    if (msg.BinaryPayload != null && msg.BinaryPayload.Length > 0)
+                        cos.WriteBytesTag(20).WriteBytes(Google.Protobuf.ByteString.CopyFrom(msg.BinaryPayload));
+                    break;
             }
 
             cos.Flush();
@@ -762,6 +830,11 @@ namespace ShootingGame.Shared.Protocol
                     {
                         var subCis = cis.ReadMessage();
                         msg.AbilityEvent = DeserializeAbilityEvent(subCis);
+                        break;
+                    }
+                    case 20:
+                    {
+                        msg.BinaryPayload = cis.ReadBytes().ToByteArray();
                         break;
                     }
                 }
@@ -1414,6 +1487,8 @@ namespace ShootingGame.Shared.Protocol
         Disconnect = 7,
         Heartbeat = 8,
         AbilityEvent = 9,
+        DeltaState = 10,    // I/P帧增量状态同步
+        RpcCall = 11,       // RPC调用
     }
 
     public class GameMessage
@@ -1431,6 +1506,10 @@ namespace ShootingGame.Shared.Protocol
         public DisconnectMsg Disconnect;
         public HeartbeatMsg Heartbeat;
         public AbilityEventData AbilityEvent;
+
+        // Binary payload for DeltaState and RpcCall
+        // Raw bytes serialized by NetworkFrameSerializer, decoded by Network.Core layer
+        public byte[] BinaryPayload;
     }
 
     public class InputBatchMsg

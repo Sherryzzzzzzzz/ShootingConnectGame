@@ -1,0 +1,6 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!4224275693 &1
+InputActionReference:
+  m_Asset: {fileID: -499182079627289615, guid: 8c5b06297daf11f46b9f9e9f9c52f1a8, type: 3}
+  m_Action: c26d1f58-dff7-4676-987e-a6bbb2ee79cf
