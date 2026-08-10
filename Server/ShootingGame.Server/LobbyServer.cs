@@ -185,6 +185,7 @@ namespace ShootingGame.Server
         public bool IsInQueue { get; set; }
         public int TeamId { get; set; }
         public int HeroId { get; set; } = ShootingGame.Shared.Hero.HeroRegistry.DefaultHeroId;
+        public bool HeroConfirmed { get; set; }
 
         private readonly TcpClient _tcpClient;
         private readonly LobbyServer _server;

@@ -203,14 +203,14 @@ public class CharacterWorkflow : EditorWindow
 
         // Add components
         if (instance.GetComponent<AnimancerComponent>() == null) instance.AddComponent<AnimancerComponent>();
-        var pg = instance.GetComponent<PistolGirlStateMachine>();
-        if (pg == null) pg = instance.AddComponent<PistolGirlStateMachine>();
-        pg.capsule = instance.GetComponent<CapsuleCollider>();
-        if (pg.capsule == null)
+        var view = instance.GetComponent<PlayerAnimationView>();
+        if (view == null) view = instance.AddComponent<PlayerAnimationView>();
+        view.capsule = instance.GetComponent<CapsuleCollider>();
+        if (view.capsule == null)
         {
             var cap = instance.AddComponent<CapsuleCollider>();
             cap.center = new Vector3(0, 0.9f, 0); cap.radius = 0.35f; cap.height = 1.8f;
-            pg.capsule = cap;
+            view.capsule = cap;
         }
         var bodyAnim = instance.GetComponentInChildren<Animator>(true);
         if (bodyAnim != null)

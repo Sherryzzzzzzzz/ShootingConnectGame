@@ -44,6 +44,10 @@ enum ActionCode {
   PLAYER_JOINED = 208;
   PLAYER_LEFT = 209;
   DISCONNECT = 210;
+
+  // RPC & Delta (230-239)
+  RPC_CALL = 230;
+  DELTA_STATE = 231;
 }
 
 enum ReturnCode {
@@ -60,9 +64,9 @@ enum GameMessageType {
   DAMAGE_EVENT = 2;
   CONNECTION_REQUEST = 3;
   CONNECTION_ACCEPTED = 4;
-  PLAYER_JOINED = 5;
-  PLAYER_LEFT = 6;
-  DISCONNECT = 7;
+  GM_PLAYER_JOINED = 5;
+  GM_PLAYER_LEFT = 6;
+  GM_DISCONNECT = 7;
   HEARTBEAT = 8;
   ABILITY_EVENT = 9;
 }
@@ -81,6 +85,8 @@ message MainPack {
   RoomInfo room_info = 9;
   repeated RoomInfo room_infos = 10;
   repeated BattlePlayerPack battle_player_packs = 11;
+  bytes rpc_payload = 12;
+  repeated ScoreEntryMsg score_entries = 13;
 }
 
 // ==================== User Messages ====================
@@ -121,6 +127,17 @@ message BattleInfo {
   repeated HitEventMsg hit_events = 8;
   repeated PlayerStateMsg player_states = 9;
   repeated BattlePlayerInfo battle_players = 10;
+  repeated SpawnPointMsg spawn_points = 11;
+  bytes collision_data = 12;
+}
+
+
+// ==================== Spawn Points ====================
+
+message SpawnPointMsg {
+  Vec3Msg position = 1;
+  float yaw = 2;
+  int32 team_id = 3;
 }
 
 message BattlePlayerInfo {
@@ -185,6 +202,12 @@ message PlayerStateMsg {
   bool is_reloading = 12;
   int64 tag_bitmask = 13;
   repeated AbilityInstanceMsg active_abilities = 14;
+  float vertical_velocity = 15;
+  bool is_aiming = 16;
+  bool is_crouching = 17;
+  int32 max_hp = 18;
+  int32 kills = 19;
+  int32 deaths = 20;
 }
 
 // ==================== Hit Events ====================
@@ -197,6 +220,17 @@ message HitEventMsg {
   bool is_kill = 5;
   Vec3Msg hit_point = 6;
   int32 hit_frame_id = 7;
+  int32 body_part = 8;  // 0=胸 1=头 2=腹 3=四肢
+}
+
+
+// ==================== Scoreboard ====================
+
+message ScoreEntryMsg {
+  int32 player_id = 1;
+  string player_name = 2;
+  int32 kills = 3;
+  int32 deaths = 4;
 }
 
 // ==================== Ability Messages ====================

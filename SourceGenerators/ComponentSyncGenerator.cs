@@ -76,7 +76,10 @@ namespace ShootingGame.SourceGen
                 var source = GenerateComponentSyncCode(symbol, context);
                 if (source != null)
                 {
-                    var hintName = $"{symbol.ContainingNamespace}_{symbol.Name}.g.cs";
+                    var nsName = symbol.ContainingNamespace.IsGlobalNamespace
+                        ? "Global"
+                        : symbol.ContainingNamespace.ToDisplayString();
+                    var hintName = $"{nsName}_{symbol.Name}.g.cs";
                     context.AddSource(hintName, source);
                 }
             }

@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using ShootingGame.Shared.GameplayTags;
 using ShootingGame.Shared.Protocol;
 
@@ -6,6 +7,29 @@ namespace ShootingGame.Server
 {
     class Program
     {
+        /// <summary>
+        /// 自动探测客户端导出的碰撞数据 collision.bin。
+        /// 从上到下尝试常见路径：显式参数 > 项目 StreamingAssets > 当前目录 > 上级目录。
+        /// </summary>
+        static string AutoFindCollisionFile()
+        {
+            string[] candidates = {
+                Path.Combine(Directory.GetCurrentDirectory(), "Assets", "StreamingAssets", "collision.bin"),
+                Path.Combine(Directory.GetCurrentDirectory(), "StreamingAssets", "collision.bin"),
+                Path.Combine(Directory.GetCurrentDirectory(), "collision.bin"),
+                // 从 exe 位置往上找项目根
+                Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", "Assets", "StreamingAssets", "collision.bin"),
+                Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "Assets", "StreamingAssets", "collision.bin"),
+            };
+            foreach (var p in candidates)
+            {
+                var full = Path.GetFullPath(p);
+                if (File.Exists(full))
+                    return full;
+            }
+            return null;
+        }
+
         static void Main(string[] args)
         {
             int lobbyPort = 7778;
@@ -55,6 +79,16 @@ namespace ShootingGame.Server
             Console.WriteLine($"Lobby Port (TCP): {lobbyPort}");
             Console.WriteLine($"Battle Port (UDP): {battlePort}");
             Console.WriteLine("========================================");
+
+            // 未指定 --collision 时自动探测客户端的 collision.bin（AABB 碰撞数据）
+            if (string.IsNullOrEmpty(collisionPath))
+            {
+                collisionPath = AutoFindCollisionFile();
+                if (collisionPath != null)
+                    Console.WriteLine($"[Program] Auto-found collision file: {collisionPath}");
+                else
+                    Console.WriteLine("[Program] WARNING: collision.bin not found, server will use default floor only (client has walls!)");
+            }
 
             // Create components
             var matchMaker = new MatchMaker(playersPerMatch: playersPerMatch, teamsPerMatch: 2);
@@ -183,6 +217,89 @@ namespace ShootingGame.Server
                 case ActionCode.LeaveRoom:
                     HandleLeaveRoom(client, pack, roomManager);
                     break;
+
+                case ActionCode.HeroSelected:
+                    // 转发给其他客户端（按 BattlePlayerId 组播）
+                    BroadcastToBattlePlayers(client, pack, matchMaker);
+                    // 不回显——发送方自己更新UI
+                    client.Send(new MainPack
+                    {
+                        RequestCode = RequestCode.Battle,
+                        ActionCode = ActionCode.Ping,
+                        ReturnCode = ReturnCode.Success
+                    });
+                    break;
+
+                case ActionCode.HeroConfirmed:
+                    // 转发给其他客户端
+                    BroadcastToBattlePlayers(client, pack, matchMaker);
+                    client.HeroConfirmed = true;
+                    client.Send(new MainPack
+                    {
+                        RequestCode = RequestCode.Battle,
+                        ActionCode = ActionCode.Ping,
+                        ReturnCode = ReturnCode.Success
+                    });
+                    // 检查是否所有玩家都已确认
+                    CheckAllHeroesConfirmed(matchMaker, lobbyServer);
+                    break;
+            }
+        }
+
+        static void BroadcastToBattlePlayers(LobbyClient sender, MainPack pack, MatchMaker matchMaker)
+        {
+            // 找到发送者所在的战斗
+            BattleRoom battle = null;
+            foreach (var b in matchMaker.ActiveBattles.Values)
+            {
+                foreach (var p in b.Context.Players)
+                {
+                    if (p.UserId == sender.UserId) { battle = b; break; }
+                }
+                if (battle != null) break;
+            }
+            if (battle == null) return;
+
+            // 广播给其他玩家
+            foreach (var player in battle.Context.Players)
+            {
+                if (player.UserId == sender.UserId) continue;
+                if (player.Client == null) continue;
+                player.Client.Send(new MainPack
+                {
+                    RequestCode = pack.RequestCode,
+                    ActionCode = pack.ActionCode,
+                    IntVal = pack.IntVal,
+                    Str = pack.Str
+                });
+            }
+        }
+
+        static void CheckAllHeroesConfirmed(MatchMaker matchMaker, LobbyServer lobbyServer)
+        {
+            foreach (var battle in matchMaker.ActiveBattles.Values)
+            {
+                if (battle.IsStarted) continue;
+                bool allConfirmed = true;
+                foreach (var player in battle.Context.Players)
+                {
+                    if (player.Client == null || !player.Client.HeroConfirmed)
+                    {
+                        allConfirmed = false;
+                        break;
+                    }
+                }
+                if (allConfirmed)
+                {
+                    Console.WriteLine($"[HeroSelect] All players confirmed for Battle {battle.Context.BattleId}");
+                    lobbyServer.Broadcast(new MainPack
+                    {
+                        RequestCode = RequestCode.Battle,
+                        ActionCode = ActionCode.StartEnterBattle
+                    });
+                    // 通知 BattleUdpServer 开始接受 BattleReady
+                    battle.ForceStart();
+                }
             }
         }
 

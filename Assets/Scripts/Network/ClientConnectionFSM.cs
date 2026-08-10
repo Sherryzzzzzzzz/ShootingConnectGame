@@ -25,10 +25,17 @@ namespace ShootingGame.Shared.Protocol.Kcp
         public int MaxHandshakeRetries = 5;
         public float HandshakeRetryIntervalSec = 1.0f;
         public float ReconnectTimeoutSec = 30.0f;
+        public float ReconnectBackoffBaseSec = 0.5f; // 重连指数退避基数
+        public float ReconnectBackoffMaxSec = 10.0f;  // 重连最大间隔
+        public int MaxReconnectAttempts = 10;
 
         // Token (assigned by server, preserved across reconnects)
         public string SessionToken { get; private set; }
         public byte AssignedPlayerId { get; private set; } = 255;
+
+        // 指数退避重连跟踪
+        private int _reconnectAttempts;
+        private float _reconnectDelaySec;
 
         // Handshake state
         private int _handshakeAttempts;
@@ -78,8 +85,18 @@ namespace ShootingGame.Shared.Protocol.Kcp
             if (CurrentState == State.Connected)
             {
                 _reconnectStartTime = Time.unscaledTime;
+                _reconnectAttempts = 0;
+                _reconnectDelaySec = ReconnectBackoffBaseSec;
                 TransitionTo(State.Reconnecting);
             }
+        }
+
+        /// <summary>重连成功（服务端接受了Token）</summary>
+        public void OnReconnected()
+        {
+            _reconnectAttempts = 0;
+            _reconnectDelaySec = ReconnectBackoffBaseSec;
+            TransitionTo(State.Connected);
         }
 
         public void OnReconnectFailed()
@@ -106,6 +123,14 @@ namespace ShootingGame.Shared.Protocol.Kcp
                     {
                         Debug.LogWarning($"[ClientFSM] Reconnection timed out after {ReconnectTimeoutSec}s");
                         OnReconnectFailed();
+                    }
+                    else if (currentTime - _lastHandshakeTime >= _reconnectDelaySec
+                             && _reconnectAttempts < MaxReconnectAttempts)
+                    {
+                        _reconnectAttempts++;
+                        // 指数退避: delay = min(base * 2^(n-1), max)
+                        _reconnectDelaySec = Mathf.Min(ReconnectBackoffBaseSec * Mathf.Pow(2, _reconnectAttempts - 1), ReconnectBackoffMaxSec);
+                        SendHandshakeAttempt();
                     }
                     break;
             }

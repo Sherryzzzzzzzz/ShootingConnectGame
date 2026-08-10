@@ -397,6 +397,7 @@ namespace ShootingGame.Shared.Protocol
             if (op.Run) cos.WriteBoolTag(11).WriteBool(op.Run);
             if (op.Aim) cos.WriteBoolTag(12).WriteBool(op.Aim);
             if (op.Reload) cos.WriteBoolTag(13).WriteBool(op.Reload);
+            if (op.Crouch) cos.WriteBoolTag(24).WriteBool(op.Crouch);
             // 客户端预测位置（字段 15-20）
             if (op.PosX != 0) cos.WriteFloatTag(15).WriteFloat(op.PosX);
             if (op.PosY != 0) cos.WriteFloatTag(16).WriteFloat(op.PosY);

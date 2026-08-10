@@ -104,16 +104,16 @@ public class GameInitializer : MonoBehaviour
             go.AddComponent<DynamicTickSystem>();
         }
 
-        if (AttackManager.Instance == null)
+        if (ClientBulletSystem.Instance == null)
         {
-            var go = new GameObject("AttackManager");
-            go.AddComponent<AttackManager>();
+            var go = new GameObject("ClientBulletSystem");
+            go.AddComponent<ClientBulletSystem>();
         }
 
-        if (HitEventManager.Instance == null)
+        if (HitEventView.Instance == null)
         {
-            var go = new GameObject("HitEventManager");
-            go.AddComponent<HitEventManager>();
+            var go = new GameObject("HitEventView");
+            go.AddComponent<HitEventView>();
         }
 
         if (AuthoritySync.Instance == null)
@@ -126,6 +126,14 @@ public class GameInitializer : MonoBehaviour
         {
             var go = new GameObject("BattleManager");
             go.AddComponent<BattleManager>();
+        }
+
+        // 确保卡通后处理 Global Volume 存在（跨场景生效）
+        if (FindFirstObjectByType<AutoPostFXSetup>() == null)
+        {
+            var go = new GameObject("AutoPostFXSetup");
+            go.AddComponent<AutoPostFXSetup>();
+            DontDestroyOnLoad(go);
         }
 
         Debug.Log("[GameInitializer] 所有单例组件已初始化");

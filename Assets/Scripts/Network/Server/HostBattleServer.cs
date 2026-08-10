@@ -175,7 +175,6 @@ namespace ShootingGame.Network.Server
                 // 处理攻击（hitscan），然后移到广播列表
                 if (slot.LatestOp?.AttackOperations != null && slot.LatestOp.AttackOperations.Count > 0)
                 {
-                    Debug.Log($"[HostBattleServer] TICK_ATK: player={clientId} count={slot.LatestOp.AttackOperations.Count}");
                     foreach (var atk in slot.LatestOp.AttackOperations)
                         ProcessAttack(clientId, atk, hitEvents);
                     slot.PendingBroadcastAttacks = slot.LatestOp.AttackOperations;
@@ -294,14 +293,6 @@ namespace ShootingGame.Network.Server
 
             // 检查游戏结束
             CheckGameOver();
-
-            // 每秒诊断一次
-            if (_currentTick % 60 == 0)
-            {
-                foreach (var (pid, s) in _players)
-                    if (s.IsReady)
-                        Debug.Log($"[HostBattleServer] tick={_currentTick} player={pid} pos=({s.Snapshot.Position.x:F2},{s.Snapshot.Position.y:F2},{s.Snapshot.Position.z:F2}) ground={s.Snapshot.IsGrounded}");
-            }
         }
 
         private bool _gameOverSent;
@@ -382,8 +373,6 @@ namespace ShootingGame.Network.Server
                 var aabb = capsule.BoundingBox();
                 var ray = new ShootingGame.Shared.Physics.Ray(origin, direction);
 
-                // 诊断第一个攻击
-                Debug.Log($"[HostBattleServer] Hitscan: attacker={attackerId} origin=({origin.x:F2},{origin.y:F2},{origin.z:F2}) dir=({direction.x:F2},{direction.y:F2},{direction.z:F2}) target={targetId} pos=({targetPos.x:F2},{targetPos.y:F2},{targetPos.z:F2}) aabb=({aabb.Min.x:F2},{aabb.Max.x:F2})");
 
                 var hit = Intersection.RayAABB(ray, aabb, closestDist);
                 if (hit.Hit && hit.Distance < closestDist)
@@ -391,11 +380,9 @@ namespace ShootingGame.Network.Server
                     closestDist = hit.Distance;
                     victimId = targetId;
                     hitPoint = hit.Point;
-                    Debug.Log($"[HostBattleServer] Hitscan HIT: target={targetId} dist={closestDist:F2}");
                 }
             }
 
-            if (victimId < 0) { Debug.Log($"[HostBattleServer] Hitscan MISS: attacker={attackerId}"); return; }
 
             // 应用伤害（枪械驱动 + 距离衰减）
             var victimSlot = _players[victimId];
@@ -404,7 +391,6 @@ namespace ShootingGame.Network.Server
             byte newHp = (byte)Mathf.Max(0, victimSlot.Snapshot.Health - damage);
             victimSlot.Snapshot.Health = newHp;
 
-            Debug.Log($"[HostBattleServer] HIT: attacker={attackerId} victim={victimId} dmg={damage} newHp={newHp}");
 
             hitEvents.Add(new HitEventMsg
             {
@@ -454,6 +440,18 @@ namespace ShootingGame.Network.Server
 
         private void HandleBattleReady(int clientId, MainPack pack)
         {
+            // 新一局：如果上一局已结束（_gameOverSent），重置服务端状态
+            if (_gameOverSent)
+            {
+                _players.Clear();
+                _udpToPlayerId.Clear();
+                _gameOverSent = false;
+                _currentTick = 1;
+                _expectedPlayerCount = 0;
+                PendingAttacks.Clear();
+                Debug.Log("[HostBattleServer] 新一局开始，已重置服务端状态");
+            }
+
             // 用 BattlePlayerId（MatchFound 分配）做 key，保证和客户端一致
             int battlePlayerId = pack.BattleInfo?.OperationId ?? clientId;
             _udpToPlayerId[clientId] = battlePlayerId;
@@ -497,10 +495,6 @@ namespace ShootingGame.Network.Server
             if (op == null) return;
 
             int playerId = _udpToPlayerId.TryGetValue(clientId, out var pid) ? pid : clientId;
-
-            // 诊断攻击操作
-            if (op.AttackOperations != null && op.AttackOperations.Count > 0)
-                Debug.Log($"[HostBattleServer] RECV ATTACK: player={playerId} UDP={clientId} atkCount={op.AttackOperations.Count} atkId={op.AttackOperations[0].AttackId}");
 
             var input = new InputFrame
             {

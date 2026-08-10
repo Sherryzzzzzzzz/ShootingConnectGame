@@ -4,36 +4,32 @@ using UnityEngine;
 using ShootingGame.Shared.Protocol;
 using ShootingGame.Shared.Simulation;
 using ShootingGame.Shared.GameplayTags;
+using ShootingGame.Shared.ECS;
 using SharedVec3 = ShootingGame.Shared.Math.Vec3;
 
 /// <summary>
-/// Authority Sync handles authoritative state synchronization from server.
-/// Manages position override, HP sync, death determination, and GameOver.
+/// 权威状态缓存层（L3 IO/编排层）。
+/// 职责（ECS 化后瘦身）：
+///  - 缓存服务端玩家状态（供查询 API）
+///  - 远程玩家状态 → 委托 ClientRemoteInterpolationSystem 缓存进 ECS
+///  - 本地玩家死亡/复活 → 委托 ClientECSWorld
+///  - 权威帧子弹生成 → 委托 ClientBulletSystem
+///  - 游戏结束事件
+/// 状态查询 API（GetPlayerState/GetPlayerHp/IsPlayerDead）供表现层使用。
 /// </summary>
 public class AuthoritySync : MonoBehaviour
 {
-    [Header("Smoothing Settings")]
-    [SerializeField] private float positionSmoothTime = 0.1f;
-    [SerializeField] private float snapThreshold = 5f;
-    [SerializeField] private float rotationSmoothSpeed = 10f;
-
     [Header("References")]
-    [SerializeField] private NetPlayerController localPlayerController;
-    [SerializeField] private RemotePlayerController[] remotePlayerControllers;
+    [SerializeField] private RemotePlayerController[] remotePlayerControllers; // 兼容字段（表现层保留）
 
     // Player states from server
     private readonly Dictionary<int, AuthoritativePlayerState> _playerStates = new Dictionary<int, AuthoritativePlayerState>();
 
-    // Attack dedup: track which authority attacks have already been spawned visually
-    // Uses composite key (attackerId << 16 | attackId) since attack IDs are only unique per-client
+    // Attack dedup: 权威攻击已生成集合（委托给 ClientBulletSystem 后仅用于统计）
     private readonly HashSet<long> _spawnedAuthorityAttacks = new HashSet<long>();
     private int _spawnedBulletCount = 0;
     private int _skippedPredictedCount = 0;
     private int _skippedDedupCount = 0;
-
-    // Local prediction history
-    private readonly Dictionary<int, PlayerSnapshot> _predictionHistory = new Dictionary<int, PlayerSnapshot>();
-    private int _lastReconciledFrame = -1;
 
     // Game state
     private bool _isGameOver;
@@ -65,7 +61,6 @@ public class AuthoritySync : MonoBehaviour
 
     private void Start()
     {
-        // Subscribe to BattleClient events
         if (BattleClient.Instance != null)
         {
             BattleClient.Instance.OnFrameReceived += OnFrameReceived;
@@ -82,43 +77,32 @@ public class AuthoritySync : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Process a received frame from the server.
-    /// </summary>
+    /// <summary>处理服务端帧：缓存状态 + 分发到 ECS 系统。</summary>
     private void OnFrameReceived(AllPlayerOperation frame)
     {
-        // Process player states
         foreach (var state in frame.PlayerStates)
         {
             ProcessPlayerState(state);
         }
 
-        // Spawn visual bullets from authority frames (Path B)
-        // This ensures ALL clients see ALL bullets, not just their own
         SpawnVisualBulletsFromFrame(frame);
     }
 
-    /// <summary>
-    /// Spawn visual bullets from all attack operations in an authority frame.
-    /// This is Path B (authority path) for visual bullets. Path A (local prediction)
-    /// is handled in NetPlayerController.SendInputToServer.
-    /// </summary>
+    /// <summary>从权威帧生成视觉子弹（委托 ClientBulletSystem，Path B）。</summary>
     private void SpawnVisualBulletsFromFrame(AllPlayerOperation frame)
     {
-        if (VisualBulletManager.Instance == null)
+        if (ClientBulletSystem.Instance == null)
         {
-            Debug.LogWarning("[AuthSync] VisualBulletManager.Instance is null, cannot spawn visual bullets");
+            Debug.LogWarning("[AuthSync] ClientBulletSystem.Instance is null, cannot spawn visual bullets");
             return;
         }
 
         int localPlayerId = BattleClient.Instance?.BattlePlayerId ?? -1;
         int serverFrameId = frame.FrameId;
-        int totalOpsChecked = 0;
         int totalAttacksFound = 0;
 
         foreach (var op in frame.Operations)
         {
-            totalOpsChecked++;
             if (op.AttackOperations == null || op.AttackOperations.Count == 0)
                 continue;
 
@@ -129,43 +113,49 @@ public class AuthoritySync : MonoBehaviour
             {
                 long compositeKey = ((long)attackerId << 32) | (uint)atk.AttackId;
 
-                // Dedup: skip attacks already spawned via local prediction (Path A)
-                if (attackerId == localPlayerId &&
-                    AttackManager.Instance != null &&
-                    AttackManager.Instance.TryConsumePredictedAttack(atk.AttackId))
+                // 本地预测攻击：权威帧已包含 → 消费预测标记 + 确认攻击
+                if (attackerId == localPlayerId && ClientECSWorld.Instance != null)
                 {
-                    _skippedPredictedCount++;
-                    // 服务端权威帧已包含此攻击 → 确认攻击已被服务端处理
-                    AttackManager.Instance.ConfirmAttack(atk.AttackId);
-                    continue;
+                    var world = ClientECSWorld.Instance;
+                    var entity = world.GetLocalPlayerEntity();
+                    if (world.EntityManager.IsValid(entity) &&
+                        ClientAttackSystem.TryConsumePredictedAttack(world.EntityManager, entity, atk.AttackId))
+                    {
+                        _skippedPredictedCount++;
+                        ClientAttackSystem.ConfirmAttack(world.EntityManager, entity, atk.AttackId);
+                        continue;
+                    }
                 }
 
-                // Dedup: skip authority attacks we've already spawned
+                // 权威攻击去重（本地维护，子弹系统自己也有去重，双保险）
                 if (_spawnedAuthorityAttacks.Contains(compositeKey))
                 {
                     _skippedDedupCount++;
                     continue;
                 }
-
                 _spawnedAuthorityAttacks.Add(compositeKey);
 
-                // 如果这是本地玩家的攻击（通过 Path B 权威路径），确认攻击已被服务端处理
-                if (attackerId == localPlayerId && AttackManager.Instance != null)
-                    AttackManager.Instance.ConfirmAttack(atk.AttackId);
+                // 本地玩家攻击确认
+                if (attackerId == localPlayerId && ClientECSWorld.Instance != null)
+                {
+                    var world = ClientECSWorld.Instance;
+                    var entity = world.GetLocalPlayerEntity();
+                    if (world.EntityManager.IsValid(entity))
+                        ClientAttackSystem.ConfirmAttack(world.EntityManager, entity, atk.AttackId);
+                }
 
-                // Compute direction from AttackOperation's stored values
+                // 弹道方向
                 float aimYaw = Mathf.Atan2(atk.TowardX, atk.TowardY) * Mathf.Rad2Deg;
                 Vector3 fireDir = Quaternion.Euler(atk.AimPitch, aimYaw, 0f) * Vector3.forward;
 
-                // 获取子弹生成位置。远程玩家使用插值后的视觉位置，确保子弹从对方可见的枪口射出
+                // 生成位置：远程用表现位置，本地用 SpawnPos/权威状态
                 Vector3 spawnPos;
                 if (attackerId != localPlayerId)
                 {
-                    // 远程玩家：使用插值后的视觉位置 + 枪口偏移
-                    var remoteCtrl = RemotePlayerController.GetPlayer(attackerId);
-                    if (remoteCtrl != null)
+                    var remote = GetRemoteFireOrigin(attackerId);
+                    if (remote.HasValue)
                     {
-                        spawnPos = remoteCtrl.GetFireOrigin();
+                        spawnPos = remote.Value;
                     }
                     else if (atk.SpawnPos.x != 0f || atk.SpawnPos.y != 0f || atk.SpawnPos.z != 0f)
                     {
@@ -177,13 +167,12 @@ public class AuthoritySync : MonoBehaviour
                     }
                     else
                     {
-                        Debug.LogWarning($"[AuthSync] No remoteCtrl/SpawnPos/authState for attacker {attackerId}, attack {atk.AttackId}");
+                        Debug.LogWarning($"[AuthSync] No spawn source for attacker {attackerId}, attack {atk.AttackId}");
                         continue;
                     }
                 }
                 else
                 {
-                    // 本地玩家：使用 SpawnPos（Path B 权威回退）
                     if (atk.SpawnPos.x != 0f || atk.SpawnPos.y != 0f || atk.SpawnPos.z != 0f)
                     {
                         spawnPos = new Vector3(atk.SpawnPos.x, atk.SpawnPos.y, atk.SpawnPos.z);
@@ -191,81 +180,66 @@ public class AuthoritySync : MonoBehaviour
                     else if (_playerStates.TryGetValue(attackerId, out var authState))
                     {
                         spawnPos = new Vector3(authState.Position.x, authState.Position.y + GameConstants.PlayerHeight * 0.85f, authState.Position.z);
-                        Debug.LogWarning($"[AuthSync] SpawnPos was zero for local attack {atk.AttackId}, using authState fallback");
                     }
                     else
                     {
-                        Debug.LogWarning($"[AuthSync] No SpawnPos and no authState for local attacker {attackerId}, attack {atk.AttackId}");
+                        Debug.LogWarning($"[AuthSync] No SpawnPos for local attack {atk.AttackId}");
                         continue;
                     }
                 }
 
-                // 计算帧差补偿距离（使用 VisualBulletManager 的实际速度）
+                // 帧差补偿
                 int spawnFrame = atk.ClientFrameId;
                 int frameDiff = Mathf.Max(0, serverFrameId - spawnFrame);
                 frameDiff = Mathf.Min(frameDiff, GameConstants.MaxCompensationTicks);
-                float bulletSpeed = VisualBulletManager.Instance != null ? VisualBulletManager.Instance.BulletSpeed : 100f;
+                float bulletSpeed = ClientBulletSystem.Instance != null ? ClientBulletSystem.Instance.BulletSpeed : 100f;
                 float advanceDistance = bulletSpeed * (frameDiff * GameConstants.TickDelta);
 
-                // 子弹位置由 SpawnAuthorityBullet 内部做网络延迟补偿
-                Vector3 visualSpawnPos = spawnPos;
-
-                VisualBulletManager.Instance.SpawnAuthorityBullet(
-                    visualSpawnPos, fireDir, atk.AttackId, attackerId, advanceDistance);
+                ClientBulletSystem.Instance.SpawnAuthorityBullet(spawnPos, fireDir, atk.AttackId, attackerId, advanceDistance);
                 _spawnedBulletCount++;
-
-                // Log first 5 bullets and every 30th
-                if (_spawnedBulletCount <= 5 || _spawnedBulletCount % 30 == 1)
-                {
-                    Debug.Log($"[AuthSync] Spawned visual bullet #{_spawnedBulletCount}: atkId={atk.AttackId} attacker={attackerId} serverFrame={serverFrameId} spawnFrame={spawnFrame} frameDiff={frameDiff} advance={advanceDistance:F1} pos={visualSpawnPos} dir={fireDir}");
-                }
             }
         }
 
-        // Clean old dedup entries
-        if (_spawnedAuthorityAttacks.Count > 200)
+        if (_spawnedAuthorityAttacks.Count > 500)
         {
-            var toRemove = new List<long>();
-            int toKeep = 100;
-            foreach (var key in _spawnedAuthorityAttacks)
-            {
-                if (toKeep-- <= 0) break;
-                toRemove.Add(key);
-            }
-            // Actually, we want to remove the OLDEST, not the first iterated
-            // Just clear all if too many
-            if (_spawnedAuthorityAttacks.Count > 500)
-            {
-                _spawnedAuthorityAttacks.Clear();
-                Debug.Log("[AuthSync] Cleared authority attack dedup set (size exceeded 500)");
-            }
+            _spawnedAuthorityAttacks.Clear();
         }
 
-        // Log summary: first 5 frames, then every 60 frames
         if (serverFrameId <= 5 || serverFrameId % 60 == 0)
         {
-            Debug.Log($"[AuthSync] Frame {serverFrameId}: opsChecked={totalOpsChecked} attacksFound={totalAttacksFound} spawned={_spawnedBulletCount} skippedPredicted={_skippedPredictedCount} skippedDedup={_skippedDedupCount} dedupSetSize={_spawnedAuthorityAttacks.Count}");
+            Debug.Log($"[AuthSync] Frame {serverFrameId}: attacksFound={totalAttacksFound} spawned={_spawnedBulletCount} skippedPredicted={_skippedPredictedCount} skippedDedup={_skippedDedupCount}");
         }
     }
 
-    /// <summary>
-    /// Process authoritative player state from server.
-    /// </summary>
+    /// <summary>远程玩家枪口位置（从 ECS 表现组件读取）。</summary>
+    private Vector3? GetRemoteFireOrigin(int playerId)
+    {
+        var world = ClientECSWorld.Instance;
+        if (world == null) return null;
+
+        var entity = world.GetPlayerEntity(playerId);
+        if (!world.EntityManager.IsValid(entity)) return null;
+        if (!world.EntityManager.TryGetComponent<PlayerViewComponent>(entity, out var pv)) return null;
+        if (pv.View == null) return null;
+
+        var animView = pv.AnimationView ?? pv.View.GetComponent<PlayerAnimationView>();
+        if (animView != null && animView.firePoint != null)
+            return animView.firePoint.position;
+        return pv.View.transform.position + Vector3.up * GameConstants.PlayerHeight * 0.85f;
+    }
+
+    /// <summary>处理服务端玩家状态：缓存 + 分发到 ECS 系统。</summary>
     private void ProcessPlayerState(PlayerStateMsg state)
     {
         int playerId = state.PlayerId;
 
-        // Get or create authoritative state
         if (!_playerStates.ContainsKey(playerId))
-        {
             _playerStates[playerId] = new AuthoritativePlayerState();
-        }
 
         var authState = _playerStates[playerId];
         int oldHp = authState.Hp;
         bool wasDead = authState.IsDead;
 
-        // Update state
         authState.PlayerId = playerId;
         authState.Position = state.Position;
         authState.Velocity = state.Velocity;
@@ -276,189 +250,100 @@ public class AuthoritySync : MonoBehaviour
         authState.FireCooldown = state.FireCooldown;
         authState.LastUpdateTime = Time.unscaledTime;
 
-        // Check if this is our local player
         bool isLocalPlayer = BattleClient.Instance != null && playerId == BattleClient.Instance.BattlePlayerId;
 
         if (isLocalPlayer)
         {
-            // Reconcile local prediction
-            ReconcileLocalPlayer(state);
+            // 本地玩家：死亡/复活 → 委托 ClientECSWorld（和解由 ClientNetworkSyncSystem 处理）
+            if (!wasDead && authState.IsDead)
+            {
+                ClientECSWorld.Instance?.SetDead();
+            }
+            else if (wasDead && !authState.IsDead)
+            {
+                Vector3 spawnPos = new Vector3(state.Position.x, state.Position.y, state.Position.z);
+                ClientECSWorld.Instance?.Revive(spawnPos);
+            }
         }
         else
         {
-            // Update remote player visualization
-            UpdateRemotePlayer(playerId, state);
+            // 远程玩家：缓存进 ECS 插值系统 + HP 同步 + 隐身可见性
+            var world = ClientECSWorld.Instance;
+            if (world != null)
+            {
+                var entity = world.GetPlayerEntity(playerId);
+                if (world.EntityManager.IsValid(entity))
+                {
+                    ClientRemoteInterpolationSystem.CacheFrame(world.EntityManager, entity, state);
+                    ClientRemoteInterpolationSystem.SyncHp(world.EntityManager, entity, state.Hp);
+                    ApplyRemoteVisibility(world.EntityManager, entity, state);
+                }
+            }
         }
 
-        // Check for HP change
         if (oldHp != authState.Hp)
         {
             Debug.Log($"[HP-CHANGE] playerId={playerId} oldHp={oldHp} newHp={authState.Hp} isLocal={isLocalPlayer}");
             OnPlayerHpChanged?.Invoke(playerId, authState.Hp);
         }
 
-        // Check for death
         if (!wasDead && authState.IsDead)
         {
-            if (isLocalPlayer && localPlayerController != null)
-                localPlayerController.SetDead();
             OnPlayerDeath?.Invoke(playerId);
             Debug.Log($"[AuthoritySync] Player {playerId} died");
         }
-        // Check for revive
-        else if (wasDead && !authState.IsDead)
-        {
-            if (isLocalPlayer && localPlayerController != null)
-            {
-                Vector3 spawnPos = new Vector3(state.Position.x, state.Position.y, state.Position.z);
-                localPlayerController.Revive(spawnPos);
-            }
-            Debug.Log($"[AuthoritySync] Player {playerId} revived");
-        }
     }
 
-    /// <summary>
-    /// Reconcile local player prediction with authoritative state.
-    /// </summary>
-    private void ReconcileLocalPlayer(PlayerStateMsg serverState)
+    /// <summary>远程玩家隐身（Stealth 标签）→ 表现层隐藏模型。</summary>
+    private void ApplyRemoteVisibility(EntityManager em, Entity entity, PlayerStateMsg state)
     {
-        if (localPlayerController == null) return;
+        if (!em.HasComponent<PlayerViewComponent>(entity)) return;
+        var pv = em.GetComponent<PlayerViewComponent>(entity);
+        if (pv.View == null) return;
 
-        // Get predicted state at server frame
-        // Note: In full implementation, we'd store prediction history by frame
-        // For now, we'll do a simple distance check
-
-        var localPos = localPlayerController.transform.position;
-        var serverPos = new Vector3(serverState.Position.x, serverState.Position.y, serverState.Position.z);
-        float distance = Vector3.Distance(localPos, serverPos);
-
-        if (distance > snapThreshold)
-        {
-            // Significant drift, snap to server position
-            Debug.Log($"[AuthoritySync] Snapping local player to server position (drift: {distance:F2}m)");
-            localPlayerController.transform.position = serverPos;
-        }
-        else if (distance > 0.1f)
-        {
-            // Small drift, smooth correction
-            // Could implement gradual correction here
-        }
-
-        // Sync HP
-        // The local player's HP should always match server
-    }
-
-    /// <summary>
-    /// Update remote player visualization.
-    /// </summary>
-    private void UpdateRemotePlayer(int playerId, PlayerStateMsg state)
-    {
-        // Find remote player controller
-        RemotePlayerController controller = GetRemotePlayerController(playerId);
-        if (controller == null) return;
-
-        // Update position with interpolation
-        Vector3 targetPos = new Vector3(state.Position.x, state.Position.y, state.Position.z);
-        controller.SetTargetPosition(targetPos);
-
-        // Update HP
-        controller.SetHp(state.Hp);
-
-        // Stealth visibility: hide model if Buff.Invisible tag is active
         bool isStealthed = GameplayTagConfig.Tag_Buff_Invisible.Matches(state.TagBitmask);
-        controller.SetVisible(!isStealthed);
-
-        // Update death/revive state
-        if (state.IsDead && !controller.IsDead)
+        foreach (var r in pv.View.GetComponentsInChildren<Renderer>(true))
         {
-            controller.SetDead();
-        }
-        else if (!state.IsDead && controller.IsDead)
-        {
-            Vector3 spawnPos = new Vector3(state.Position.x, state.Position.y, state.Position.z);
-            controller.Revive(spawnPos);
-            controller.SetHp(state.Hp);
+            if (r != null) r.enabled = !isStealthed;
         }
     }
 
-    private RemotePlayerController GetRemotePlayerController(int playerId)
-    {
-        if (remotePlayerControllers == null) return null;
-
-        foreach (var controller in remotePlayerControllers)
-        {
-            if (controller.PlayerId == playerId)
-                return controller;
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// Handle GameOver from server.
-    /// </summary>
+    /// <summary>处理游戏结束。</summary>
     private void OnGameOverReceived(int winnerTeamId)
     {
         _isGameOver = true;
         _winnerTeamId = winnerTeamId;
 
-        // Determine if we won or lost
         bool isWinner = BattleClient.Instance != null && BattleClient.Instance.TeamId == winnerTeamId;
-
         Debug.Log($"[AuthoritySync] Game Over! Winner team: {winnerTeamId}. We {(isWinner ? "won" : "lost")}!");
-
         OnGameOver?.Invoke(winnerTeamId);
     }
 
-    /// <summary>
-    /// Get authoritative state for a player.
-    /// </summary>
+    // ==================== 查询 API（表现层使用） ====================
+
     public AuthoritativePlayerState GetPlayerState(int playerId)
     {
         return _playerStates.TryGetValue(playerId, out var state) ? state : null;
     }
 
-    /// <summary>
-    /// Get HP for a player.
-    /// </summary>
     public int GetPlayerHp(int playerId)
     {
         return _playerStates.TryGetValue(playerId, out var state) ? state.Hp : 100;
     }
 
-    /// <summary>
-    /// Check if a player is dead.
-    /// </summary>
     public bool IsPlayerDead(int playerId)
     {
         return _playerStates.TryGetValue(playerId, out var state) && state.IsDead;
     }
 
-    /// <summary>
-    /// Store prediction snapshot for reconciliation.
-    /// </summary>
-    public void StorePrediction(int frameId, PlayerSnapshot snapshot)
-    {
-        _predictionHistory[frameId] = snapshot;
-
-        // Trim old predictions
-        int maxHistory = 64;
-        while (_predictionHistory.Count > maxHistory)
-        {
-            int oldestFrame = frameId - maxHistory;
-            _predictionHistory.Remove(oldestFrame);
-        }
-    }
-
-    /// <summary>
-    /// Reset for a new battle.
-    /// </summary>
+    /// <summary>战斗重置。</summary>
     public void Reset()
     {
         _playerStates.Clear();
-        _predictionHistory.Clear();
         _spawnedAuthorityAttacks.Clear();
-        _lastReconciledFrame = -1;
+        _spawnedBulletCount = 0;
+        _skippedPredictedCount = 0;
+        _skippedDedupCount = 0;
         _isGameOver = false;
         _winnerTeamId = 0;
     }

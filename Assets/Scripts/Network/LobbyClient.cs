@@ -49,6 +49,7 @@ public class LobbyClient : MonoBehaviour
     public event Action<int> OnOnlinePlayerCountChanged;
     public event Action<int> OnHeroSelected;    // 对方选角通知
     public event Action OnHeroConfirmed;        // 对方锁定通知
+    public event Action<int> OnStartEnterBattle; // 全员确认后进入战斗
 
     /// <summary>最后一次 JoinQueue 失败的错误消息（供 UI 查询）。</summary>
     public string LastJoinQueueError { get; private set; }
@@ -429,9 +430,9 @@ public class LobbyClient : MonoBehaviour
 
     private void HandleStartEnterBattle(MainPack pack)
     {
-        // Server is telling us to prepare for battle
-        // This will be handled by BattleClient
-        Debug.Log($"[LobbyClient] Start enter battle: {pack.BattleInfo.BattleId}");
+        Debug.Log($"[LobbyClient] Start enter battle: {pack.BattleInfo?.BattleId}");
+        // 服务端全员确认后统一广播 → 直接触发场景加载，不依赖选角时序
+        OnStartEnterBattle?.Invoke(pack.BattleInfo?.BattleId ?? 0);
     }
 
     private void HandleOnlinePlayers(MainPack pack)

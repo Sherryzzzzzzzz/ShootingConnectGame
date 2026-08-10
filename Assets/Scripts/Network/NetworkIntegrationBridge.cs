@@ -77,13 +77,21 @@ public class NetworkIntegrationBridge : MonoBehaviour
     /// </summary>
     private void OnNetworkConnected()
     {
-        // 客户端 → 服务端：RPC 经由 NetworkClient 发送
+        // 客户端 → 服务端：优先走 BattleClient（MainPack{RpcCall} → .NET 生产服务器，路径 X），
+        // 编辑器 Host 模式（BattleClient 未连接）回退到 NetworkClient（GameMessage 通道）。
         NetworkBehaviour.SendServerRpcTransport = (payload) =>
         {
-            _networkClient.SendRawMessage(GameMessageType.RpcCall, payload, reliable: false);
+            if (BattleClient.Instance != null && BattleClient.Instance.IsConnected)
+            {
+                BattleClient.Instance.SendRpcCall(payload);
+            }
+            else
+            {
+                _networkClient.SendRawMessage(GameMessageType.RpcCall, payload, reliable: false);
+            }
         };
 
-        Debug.Log("[NetworkIntegrationBridge] RPC transport wired to NetworkClient");
+        Debug.Log("[NetworkIntegrationBridge] RPC transport wired (BattleClient primary, NetworkClient fallback)");
     }
 
     /// <summary>

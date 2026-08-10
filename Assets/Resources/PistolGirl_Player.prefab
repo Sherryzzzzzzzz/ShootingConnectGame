@@ -1672,7 +1672,7 @@ PrefabInstance:
     - targetCorrespondingSourceObject: {fileID: 919132149155446097, guid: ec670c9fabeb8364dacb292a1113e9d8,
         type: 3}
       insertIndex: -1
-      addedObject: {fileID: 8222190281655803653}
+      addedObject: {fileID: 8222190281655803654}
   m_SourcePrefab: {fileID: 100100000, guid: ec670c9fabeb8364dacb292a1113e9d8, type: 3}
 --- !u!4 &1597120141805517333 stripped
 Transform:
@@ -1701,22 +1701,6 @@ MonoBehaviour:
   _Animator: {fileID: 4668597402218635375}
   _Transitions: {fileID: 0}
   _ActionOnDisable: 0
---- !u!114 &7238234240016066050
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2117198570896498863}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: c857df7ec0da89a4aae4b5281fd8edf3, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  battleClient: {fileID: 0}
-  smoothingSpeed: 30
-  snapThreshold: 2
-  enableDebugLog: 0
 --- !u!114 &3636218087382062339
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1748,19 +1732,6 @@ MonoBehaviour:
   rotationSmoothSpeed: 10
   snapThreshold: 3
   renderers: []
---- !u!114 &2321454349483748896
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2117198570896498863}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 34a7b97a4d5ed0e4fb2a50368ce6bfcd, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  animSet: {fileID: 11400000, guid: 6d9562bf2946591438a00f2e20286b42, type: 2}
 --- !u!136 &7937963413265569212
 CapsuleCollider:
   m_ObjectHideFlags: 0
@@ -1784,7 +1755,7 @@ CapsuleCollider:
   m_Height: 1.8
   m_Direction: 1
   m_Center: {x: 0, y: 0.9, z: 0}
---- !u!114 &8222190281655803653
+--- !u!114 &8222190281655803654
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -1793,7 +1764,7 @@ MonoBehaviour:
   m_GameObject: {fileID: 2117198570896498863}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 58c8f048dd317aa48b168cec4b559ba4, type: 3}
+  m_Script: {fileID: 11500000, guid: 09c6505f26194cba993ba5c6bde3825d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
   animSet: {fileID: 11400000, guid: 6d9562bf2946591438a00f2e20286b42, type: 2}
@@ -1804,6 +1775,7 @@ MonoBehaviour:
   normalCam: {fileID: 0}
   aimCam: {fileID: 0}
   crouchCam: {fileID: 0}
+
 --- !u!95 &4668597402218635375 stripped
 Animator:
   m_CorrespondingSourceObject: {fileID: 5866666021909216657, guid: ec670c9fabeb8364dacb292a1113e9d8,

@@ -85,9 +85,18 @@ public class SceneBootstrapper : MonoBehaviour
 
         // 确保其他必要的管理器存在
         EnsureManager<DynamicTickSystem>("DynamicTickSystem");
-        EnsureManager<AttackManager>("AttackManager");
-        EnsureManager<HitEventManager>("HitEventManager");
+        EnsureManager<ClientBulletSystem>("ClientBulletSystem");
+        EnsureManager<HitEventView>("HitEventView");
         EnsureManager<AuthoritySync>("AuthoritySync");
+        EnsureManager<ProceduralEffectManager>("ProceduralEffectManager");
+
+        // 确保卡通后处理 Global Volume 存在
+        if (FindFirstObjectByType<AutoPostFXSetup>() == null)
+        {
+            var go = new GameObject("AutoPostFXSetup");
+            go.AddComponent<AutoPostFXSetup>();
+            Debug.Log("[SceneBootstrapper] 创建 AutoPostFXSetup (卡通后处理)");
+        }
 
         Debug.Log("[SceneBootstrapper] 场景配置完成！");
     }

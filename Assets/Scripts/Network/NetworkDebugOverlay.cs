@@ -48,21 +48,21 @@ public class NetworkDebugOverlay : MonoBehaviour
     }
     public readonly List<RemoteDebugInfo> RemotePlayers = new List<RemoteDebugInfo>();
 
-    private NetPlayerController _localController;
+    private ClientECSWorld _localWorld;
     private BattleClient _battleClient;
     private int _lastSentTick;
 
     private void Start()
     {
-        _localController = FindFirstObjectByType<NetPlayerController>();
+        _localWorld = FindFirstObjectByType<ClientECSWorld>();
         _battleClient = BattleClient.Instance;
     }
 
     private void Update()
     {
-        if (_localController != null && _battleClient != null && _battleClient.IsInBattle)
+        if (_localWorld != null && _battleClient != null && _battleClient.IsInBattle)
         {
-            var snap = _localController.CurrentSnapshot;
+            var snap = _localWorld.CurrentSnapshot;
             LastTick = snap.Tick;
             LastSentMoveX = snap.Velocity.x;
             LastSentMoveZ = snap.Velocity.z;
@@ -202,9 +202,9 @@ public class NetworkDebugOverlay : MonoBehaviour
         lineY += 100;
 
         // 快照朝向（RotationY from snapshot）
-        if (_localController != null)
+        if (_localWorld != null)
         {
-            var snap = _localController.CurrentSnapshot;
+            var snap = _localWorld.CurrentSnapshot;
             float snapYaw = snap.Rotation.EulerAngles.y;
             DrawDirectionIndicator(x + 15, lineY, 60, snapYaw, "Snap RotY");
             DrawLabel(dataX, lineY, $"Snap RotY: {snapYaw:F1}°");
@@ -251,9 +251,9 @@ public class NetworkDebugOverlay : MonoBehaviour
         DrawLabel(x + 15, lineY + 18, $"Vel: ({info.VelocityX:F2}, {info.VelocityZ:F2})");
 
         // 位置差距（相对于本地玩家）
-        if (_localController != null)
+        if (_localWorld != null)
         {
-            var localPos = _localController.CurrentSnapshot.Position;
+            var localPos = _localWorld.CurrentSnapshot.Position;
             float dist = Mathf.Sqrt(
                 (info.PositionX - localPos.x) * (info.PositionX - localPos.x) +
                 (info.PositionZ - localPos.z) * (info.PositionZ - localPos.z));

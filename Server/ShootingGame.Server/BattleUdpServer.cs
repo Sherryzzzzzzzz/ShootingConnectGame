@@ -15,6 +15,7 @@ namespace ShootingGame.Server
     public class BattleUdpServer
     {
         private readonly int _port;
+        private int _recvErrorCount;
         private UdpClient _udp;
         private volatile bool _running;
         private Thread _receiveThread;
@@ -26,6 +27,10 @@ namespace ShootingGame.Server
 
         // Battle rooms
         private readonly ConcurrentDictionary<int, BattleRoom> _battleRooms = new ConcurrentDictionary<int, BattleRoom>();
+
+        // KCP 可靠通道会话（endpoint → 会话，conv = BattleId）
+        private readonly ConcurrentDictionary<string, KcpChannel> _kcpChannels = new ConcurrentDictionary<string, KcpChannel>();
+        private Thread _kcpUpdateThread;
 
         // RTT tracking per player (smoothed, in seconds)
         private readonly ConcurrentDictionary<int, float> _playerRtt = new ConcurrentDictionary<int, float>();
@@ -55,7 +60,29 @@ namespace ShootingGame.Server
             };
             _receiveThread.Start();
 
+            StartKcpUpdateLoop();
+
             Log($"BattleUdpServer started on port {_port}");
+        }
+
+        /// <summary>KCP 定时驱动（ACK/重传/收包收集），20ms 一次</summary>
+        private void StartKcpUpdateLoop()
+        {
+            _kcpUpdateThread = new Thread(() =>
+            {
+                while (_running)
+                {
+                    uint now = (uint)Environment.TickCount;
+                    foreach (var kcp in _kcpChannels.Values)
+                        kcp.Update(now);
+                    Thread.Sleep(20);
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "BattleUdpServer_KcpUpdate"
+            };
+            _kcpUpdateThread.Start();
         }
 
         public void Stop()
@@ -105,6 +132,21 @@ namespace ShootingGame.Server
                 Send(pack, endpoint);
             };
 
+            // 服务器 → 客户端 RPC 回程：按 bpId 定向发送（走 KCP 可靠通道）
+            room.OnSendClientRpc += (battlePlayerId, payload) =>
+            {
+                if (_battlePlayerRouting.TryGetValue(battlePlayerId, out var routing))
+                {
+                    var pack = new MainPack
+                    {
+                        RequestCode = RequestCode.Battle,
+                        ActionCode = ActionCode.RpcCall,
+                        RpcPayload = payload
+                    };
+                    SendReliable(pack, routing.endpoint);
+                }
+            };
+
             Log($"Registered battle {room.BattleId}");
         }
 
@@ -149,6 +191,7 @@ namespace ShootingGame.Server
             if (_battlePlayerRouting.TryRemove(battlePlayerId, out var routing))
             {
                 _endpointToBattlePlayerId.TryRemove(routing.endpoint, out _);
+                _kcpChannels.TryRemove(routing.endpoint, out _);
             }
         }
 
@@ -162,6 +205,22 @@ namespace ShootingGame.Server
                     byte[] data = _udp.Receive(ref remote);
 
                     if (data.Length < 1) continue;
+
+                    // ── KCP 可靠通道：endpoint 有会话且 conv 匹配 → 可靠消息 ──
+                    string endpointStr = remote.ToString();
+                    if (_kcpChannels.TryGetValue(endpointStr, out var kcp) &&
+                        data.Length >= KcpChannel.KcpMinHeaderSize &&
+                        KcpChannel.ExtractConv(data, 0) == kcp.Conv)
+                    {
+                        kcp.Input(data, data.Length, out _);
+                        kcp.Update((uint)Environment.TickCount);
+                        foreach (var reliableMsg in kcp.DrainRecv())
+                        {
+                            var kcpPack = ProtobufSerializer.DeserializeMainPack(reliableMsg);
+                            HandlePacket(kcpPack, remote);
+                        }
+                        continue;
+                    }
 
                     var pack = ProtobufSerializer.DeserializeMainPack(data);
 
@@ -181,9 +240,14 @@ namespace ShootingGame.Server
 
                     HandlePacket(pack, remote);
                 }
-                catch (Exception ex) when (_running)
+                catch (Exception ex)
                 {
-                    Log($"Receive error: {ex.Message}");
+                    if (!_running) break; // 正常关闭
+                    // 客户端断开导致的 SocketException，静默处理（不刷屏）
+                    if (ex is SocketException && !_running) break;
+                    // 仅对非预期的错误打印（限制频率）
+                    if (++_recvErrorCount < 5)
+                        Log($"Receive error: {ex.Message}");
                 }
             }
         }
@@ -210,6 +274,10 @@ namespace ShootingGame.Server
                     HandleDisconnect(pack, remote);
                     break;
 
+                case ActionCode.RpcCall:
+                    HandleRpcCall(pack, remote);
+                    break;
+
                 case ActionCode.GameOver:
                     // Client confirms game over
                     break;
@@ -228,11 +296,27 @@ namespace ShootingGame.Server
             // Register routing
             RegisterPlayer(battleId, battlePlayerId, remote);
 
+            // 建立 KCP 可靠通道会话（conv = BattleId，免协商）
+            string endpointStr = remote.ToString();
+            _kcpChannels[endpointStr] = new KcpChannel((uint)battleId, (buf, len) =>
+            {
+                try { _udp.Send(buf, len, remote); } catch { /* socket closed */ }
+            });
+
             // Forward to battle room
             if (_battleRooms.TryGetValue(battleId, out var room))
             {
                 room.HandleBattleReady(battlePlayerId, remote.ToString());
             }
+        }
+
+        /// <summary>可靠发送：走 KCP 通道（无会话时回退原始 UDP）</summary>
+        public void SendReliable(MainPack pack, string endpointStr)
+        {
+            if (_kcpChannels.TryGetValue(endpointStr, out var kcp))
+                kcp.SendReliable(ProtobufSerializer.SerializeMainPack(pack));
+            else
+                Send(pack, endpointStr);
         }
 
         private void HandleBattleOperation(MainPack pack, IPEndPoint remote)
@@ -255,7 +339,6 @@ namespace ShootingGame.Server
                     int opId = pack.BattleInfo.OperationId;
                     if (opId <= 30 || opId % 30 == 0)
                     {
-                        Console.WriteLine($"[UDP-RAW] bp={battlePlayerId} tick={opId} MoveX={selfOp.MoveX:F6} MoveY={selfOp.MoveY:F6} AimYaw={selfOp.AimYaw:F6} Fire={selfOp.Fire} Jump={selfOp.Jump} Run={selfOp.Run} Aim={selfOp.Aim}");
                     }
 
                     room.HandlePlayerOperation(
@@ -265,6 +348,21 @@ namespace ShootingGame.Server
                         pack.BattleInfo.ClientAckedFrame
                     );
                 }
+            }
+        }
+
+        private void HandleRpcCall(MainPack pack, IPEndPoint remote)
+        {
+            if (pack.RpcPayload == null) return;
+
+            string endpointStr = remote.ToString();
+            if (!_endpointToBattlePlayerId.TryGetValue(endpointStr, out int battlePlayerId))
+                return;
+            if (!_battlePlayerRouting.TryGetValue(battlePlayerId, out var routing))
+                return;
+            if (_battleRooms.TryGetValue(routing.battleId, out var room))
+            {
+                room.HandleRpcCall(battlePlayerId, pack.RpcPayload);
             }
         }
 

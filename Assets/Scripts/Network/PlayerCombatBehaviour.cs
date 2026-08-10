@@ -74,4 +74,35 @@ public partial class PlayerCombatBehaviour : NetworkBehaviour
     {
         UnityEngine.Debug.Log($"[PlayerCombatBehaviour] Player {victimId} was killed!");
     }
+
+    /// <summary>
+    /// ServerRpc：技能预测确认链——客户端预测施法后请求服务器权威验证。
+    /// .NET 生产服务器经 BattleRoom 注册处理器执行；编辑器 Host 执行本方法体。
+    /// </summary>
+    [ServerRpc]
+    public void RequestActivateAbility(int assetId, int predictedId)
+    {
+        // === 编辑器 Host 模式执行 ===
+        if (EntityManager == null || !Entity.IsValid) return;
+        // 客户端预测已在本地激活；此处服务器侧再验证（Host 模式用 AbilityLifecycleSystem）
+        UnityEngine.Debug.Log($"[PlayerCombatBehaviour] ServerRpc RequestActivateAbility assetId={assetId} pred={predictedId}");
+    }
+
+    /// <summary>
+    /// ClientRpc：服务器确认技能激活 → 客户端保留预测特效（predictedId 匹配预测）。
+    /// </summary>
+    [ClientRpc]
+    public void ConfirmAbility(int predictedId, int instanceId)
+    {
+        ProceduralEffectManager.Instance?.OnAbilityConfirmed(predictedId);
+    }
+
+    /// <summary>
+    /// ClientRpc：服务器拒绝技能激活 → 客户端回滚预测特效。
+    /// </summary>
+    [ClientRpc]
+    public void RejectAbility(int predictedId)
+    {
+        ProceduralEffectManager.Instance?.OnAbilityRejected(predictedId);
+    }
 }

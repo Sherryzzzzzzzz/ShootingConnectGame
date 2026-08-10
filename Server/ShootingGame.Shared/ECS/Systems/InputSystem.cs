@@ -17,6 +17,7 @@ namespace ShootingGame.Shared.ECS
                 Aim = input.Aim,
                 Fire = input.Fire,
                 Reload = input.Reload,
+                Crouch = input.Crouch,
                 Ability1 = input.Ability1,
                 Ability2 = input.Ability2,
                 Ability3 = input.Ability3,

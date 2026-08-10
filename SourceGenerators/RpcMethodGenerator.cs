@@ -31,16 +31,24 @@ namespace ShootingGame.SourceGen
         private static readonly Dictionary<string, (string write, string read)> _typeMap =
             new Dictionary<string, (string, string)>
             {
+                // 键同时支持 C# 短名和 CLR 名（param.Type.Name 返回 Int32/Single/String 等）
                 { "byte",   ("w.WriteByte(value)",   "r.ReadByte()") },
+                { "Byte",   ("w.WriteByte(value)",   "r.ReadByte()") },
                 { "int",    ("w.WriteInt32(value)",  "r.ReadInt32()") },
+                { "Int32",  ("w.WriteInt32(value)",  "r.ReadInt32()") },
                 { "uint",   ("w.WriteUInt32(value)", "r.ReadUInt32()") },
+                { "UInt32", ("w.WriteUInt32(value)", "r.ReadUInt32()") },
                 { "float",  ("w.WriteFloat(value)",  "r.ReadFloat()") },
+                { "Single", ("w.WriteFloat(value)",  "r.ReadFloat()") },
                 { "bool",   ("w.WriteBool(value)",   "r.ReadBool()") },
+                { "Boolean",("w.WriteBool(value)",   "r.ReadBool()") },
                 { "long",   ("w.WriteInt64(value)",  "r.ReadInt64()") },
+                { "Int64",  ("w.WriteInt64(value)",  "r.ReadInt64()") },
                 { "Vec2",   ("w.WriteVec2(value)",   "r.ReadVec2()") },
                 { "Vec3",   ("w.WriteVec3(value)",   "r.ReadVec3()") },
                 { "Quat",   ("w.WriteQuat(value)",   "r.ReadQuat()") },
                 { "string", ("w.WriteString(value)", "r.ReadString()") },
+                { "String", ("w.WriteString(value)", "r.ReadString()") },
             };
 
         // Return type names that indicate async
@@ -93,7 +101,11 @@ namespace ShootingGame.SourceGen
                 var source = GenerateRpcCode(classSymbol, rpcMethods);
                 if (source != null)
                 {
-                    var hintName = $"{classSymbol.ContainingNamespace}_{classSymbol.Name}_Rpc.g.cs";
+                    // 全局命名空间显示为 "<global namespace>"，含非法字符 '<'，需替换
+                    var nsName = classSymbol.ContainingNamespace.IsGlobalNamespace
+                        ? "Global"
+                        : classSymbol.ContainingNamespace.ToDisplayString();
+                    var hintName = $"{nsName}_{classSymbol.Name}_Rpc.g.cs";
                     context.AddSource(hintName, source);
                 }
             }
@@ -103,7 +115,9 @@ namespace ShootingGame.SourceGen
             INamedTypeSymbol classSymbol,
             List<(IMethodSymbol method, bool isServerRpc, bool isClientRpc)> rpcMethods)
         {
-            var namespaceName = classSymbol.ContainingNamespace?.ToDisplayString() ?? "Global";
+            var containingNs = classSymbol.ContainingNamespace;
+            bool isGlobalNamespace = containingNs == null || containingNs.IsGlobalNamespace;
+            var namespaceName = isGlobalNamespace ? "" : containingNs.ToDisplayString();
             var className = classSymbol.Name;
             var fullTypeName = classSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 
@@ -115,9 +129,13 @@ namespace ShootingGame.SourceGen
             sb.AppendLine("using System.Threading.Tasks;");
             sb.AppendLine("using ShootingGame.Network;");
             sb.AppendLine("using ShootingGame.Shared.Protocol;");
+            sb.AppendLine("using ShootingGame.Shared.Math; // Vec2/Vec3/Quat 参数");
             sb.AppendLine();
-            sb.AppendLine($"namespace {namespaceName}");
-            sb.AppendLine("{");
+            if (!isGlobalNamespace)
+            {
+                sb.AppendLine($"namespace {namespaceName}");
+                sb.AppendLine("{");
+            }
             sb.AppendLine($"    partial class {className}");
             sb.AppendLine("    {");
 
@@ -128,8 +146,11 @@ namespace ShootingGame.SourceGen
             foreach (var (method, isServerRpc, isClientRpc) in rpcMethods)
             {
                 long methodHash = ComputeMethodHash(method);
-                string handlerName = $"__RpcHandler_{method.Name}_{methodHash:X}";
-                sb.AppendLine($"            RpcMethodRegistry.Register(0x{methodHash:X}L, {handlerName});");
+                // ServerRpc 分发器 = __RpcHandler_，ClientRpc 分发器 = __RpcClientHandler_（与生成处一致）
+                string handlerName = isServerRpc
+                    ? $"__RpcHandler_{method.Name}_{methodHash:X}"
+                    : $"__RpcClientHandler_{method.Name}_{methodHash:X}";
+                sb.AppendLine($"            RpcMethodRegistry.Register({methodHash}L, {handlerName});");
             }
             sb.AppendLine("        }");
             sb.AppendLine();
@@ -162,7 +183,10 @@ namespace ShootingGame.SourceGen
             }
 
             sb.AppendLine("    }");
-            sb.AppendLine("}");
+            if (!isGlobalNamespace)
+            {
+                sb.AppendLine("}");
+            }
             return sb.ToString();
         }
 
@@ -177,7 +201,7 @@ namespace ShootingGame.SourceGen
             sb.AppendLine("        {");
             sb.AppendLine("            var w = new PacketWriter();");
             sb.AppendLine($"            w.WriteUInt32(NetId);");
-            sb.AppendLine($"            w.WriteInt64(0x{methodHash:X}L);");
+            sb.AppendLine($"            w.WriteInt64({methodHash}L);");
             sb.AppendLine("            w.WriteUInt32(0); // reqId=0 = Fire-and-Forget");
             WriteSerializeParams(sb, method);
             sb.AppendLine("            SendServerRpc(w.ToArray());");
@@ -201,7 +225,7 @@ namespace ShootingGame.SourceGen
             WriteSerializeParams(sb, method);
             sb.AppendLine("            var payload = w.ToArray();");
             sb.AppendLine($"            var result = await RpcTransactionService.Instance.SendServerRequestAsync(");
-            sb.AppendLine($"                NetId, 0x{methodHash:X}L, payload);");
+            sb.AppendLine($"                NetId, {methodHash}L, payload);");
             sb.AppendLine($"            // 反序列化返回值");
             sb.AppendLine($"            var r = new PacketReader(result);");
             if (returnType == "byte")       sb.AppendLine("            return r.ReadByte();");
@@ -272,7 +296,7 @@ namespace ShootingGame.SourceGen
             sb.AppendLine("        {");
             sb.AppendLine("            var w = new PacketWriter();");
             sb.AppendLine($"            w.WriteUInt32(NetId);");
-            sb.AppendLine($"            w.WriteInt64(0x{methodHash:X}L);");
+            sb.AppendLine($"            w.WriteInt64({methodHash}L);");
             sb.AppendLine("            w.WriteUInt32(0); // reqId=0");
             WriteSerializeParams(sb, method);
             sb.AppendLine("            SendClientRpc(w.ToArray(), target);");
@@ -295,7 +319,7 @@ namespace ShootingGame.SourceGen
             WriteSerializeParams(sb, method);
             sb.AppendLine("            var payload = w.ToArray();");
             sb.AppendLine($"            var result = await RpcTransactionService.Instance.SendClientRequestAsync(");
-            sb.AppendLine($"                NetId, 0x{methodHash:X}L, payload, targetPlayerId);");
+            sb.AppendLine($"                NetId, {methodHash}L, payload, targetPlayerId);");
             sb.AppendLine($"            var r = new PacketReader(result);");
             if (returnType == "byte")       sb.AppendLine("            return r.ReadByte();");
             else if (returnType == "int")   sb.AppendLine("            return r.ReadInt32();");

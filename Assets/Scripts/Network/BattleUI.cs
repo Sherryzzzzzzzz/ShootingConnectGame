@@ -109,9 +109,9 @@ public class BattleUI : MonoBehaviour
             BattleManager.Instance.OnStateChanged += OnStateChanged;
         }
 
-        if (HitEventManager.Instance != null)
+        if (HitEventView.Instance != null)
         {
-            HitEventManager.Instance.OnHitEvent += OnHitEvent;
+            HitEventView.Instance.OnHitEvent += OnHitEvent;
         }
 
         if (AuthoritySync.Instance != null)
@@ -143,9 +143,9 @@ public class BattleUI : MonoBehaviour
             BattleManager.Instance.OnStateChanged -= OnStateChanged;
         }
 
-        if (HitEventManager.Instance != null)
+        if (HitEventView.Instance != null)
         {
-            HitEventManager.Instance.OnHitEvent -= OnHitEvent;
+            HitEventView.Instance.OnHitEvent -= OnHitEvent;
         }
 
         if (AuthoritySync.Instance != null)
@@ -348,21 +348,13 @@ public class BattleUI : MonoBehaviour
     }
 
     // 准星扩散：随当前散射角放大（Valorant 式 bloom 反馈）
-    private NetPlayerController _localPlayer;
     private float _playerFindTimer;
 
     private void UpdateCrosshairBloom()
     {
         if (crosshair == null) return;
 
-        _playerFindTimer -= Time.deltaTime;
-        if (_localPlayer == null && _playerFindTimer <= 0f)
-        {
-            _localPlayer = FindFirstObjectByType<NetPlayerController>();
-            _playerFindTimer = 1f;
-        }
-
-        float spread = _localPlayer != null ? _localPlayer.CurrentSpreadDeg : 0f;
+        float spread = ClientECSWorld.Instance != null ? ClientECSWorld.Instance.CurrentSpreadDeg : 0f;
         float scale = 1f + spread * 0.15f;
         crosshair.rectTransform.localScale = new Vector3(scale, scale, 1f);
     }

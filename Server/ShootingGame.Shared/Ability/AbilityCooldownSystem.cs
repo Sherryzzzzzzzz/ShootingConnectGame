@@ -24,7 +24,7 @@ namespace ShootingGame.Shared.Ability
                     if (slot.CooldownRemaining < 0f) slot.CooldownRemaining = 0f;
                 }
 
-                if ((slot.State == AbilityState.Active || slot.State == AbilityState.Predicting) &&
+                if (slot.State == AbilityState.Active &&
                     slot.DurationRemaining > 0f)
                 {
                     slot.DurationRemaining -= dt;

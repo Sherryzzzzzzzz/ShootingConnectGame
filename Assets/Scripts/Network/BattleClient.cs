@@ -36,6 +36,9 @@ public class BattleClient : MonoBehaviour
     private float _lastSendTime;
     private float _lastPingTime;
 
+    // KCP 可靠通道（conv = BattleId）：RPC 请求/回程走可靠，输入/状态走原始 UDP
+    private KcpChannel _kcp;
+
     // Input sending
     private int _clientFrameId;
     private int _serverAckedFrame;
@@ -86,6 +89,24 @@ public class BattleClient : MonoBehaviour
     {
         if (!IsConnected) return;
 
+        // 驱动 KCP（ACK/重传/收包收集），处理服务器可靠回程
+        if (_kcp != null)
+        {
+            _kcp.Update((uint)(Time.unscaledTime * 1000));
+            while (_kcp.TryRecv(out byte[] reliableMsg))
+            {
+                try
+                {
+                    var pack = ProtobufSerializer.DeserializeMainPack(reliableMsg);
+                    HandlePacket(pack);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[BattleClient] KCP reliable msg error: {ex.Message}");
+                }
+            }
+        }
+
         // Send Ping periodically
         if (Time.unscaledTime - _lastPingTime > 0.2f) // 200ms interval
         {
@@ -113,6 +134,14 @@ public class BattleClient : MonoBehaviour
             _running = true;
             IsConnected = true;
 
+            // KCP 可靠通道（conv = BattleId），output 发往服务器
+            var ep = _serverEndpoint;
+            var udp = _udp;
+            _kcp = new KcpChannel((uint)BattleId, (buf, len) =>
+            {
+                try { udp.Send(buf, len, ep); } catch { }
+            });
+
             _receiveThread = new Thread(ReceiveLoop)
             {
                 IsBackground = true,
@@ -136,6 +165,7 @@ public class BattleClient : MonoBehaviour
         _running = false;
         IsConnected = false;
         IsInBattle = false;
+        _kcp = null; // 清理 KCP 会话
 
         try
         {
@@ -170,24 +200,36 @@ public class BattleClient : MonoBehaviour
 
                 if (data.Length < 1) continue;
 
-                // 反序列化也必须在主线程（ProtopufSerializer 可能创建 Unity 对象）
-                UnityMainThreadDispatcher.Instance.Enqueue(() =>
-                {
-                    try
-                    {
-                        var pack = ProtobufSerializer.DeserializeMainPack(data);
-                        HandlePacket(pack);
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.LogError($"[BattleClient] HandlePacket error: {ex.Message}");
-                    }
-                });
+
+                // 主线程统一处理：KCP 段 → 可靠通道；否则 → 旧路径（反序列化需主线程）
+                UnityMainThreadDispatcher.Instance.Enqueue(() => ProcessIncomingData(data));
             }
             catch (Exception ex) when (_running)
             {
                 Debug.LogError($"[BattleClient] Receive error: {ex.Message}");
             }
+        }
+    }
+
+    /// <summary>主线程收包入口：KCP 段喂给可靠通道，其余走旧 MainPack 路径</summary>
+    private void ProcessIncomingData(byte[] data)
+    {
+        try
+        {
+            // KCP 段：conv 匹配 → 喂给会话（回程可靠消息由 Update 里 TryRecv 取出）
+            if (_kcp != null && data.Length >= KcpChannel.KcpMinHeaderSize &&
+                KcpChannel.ExtractConv(data, 0) == _kcp.Conv)
+            {
+                _kcp.Input(data, data.Length, out _);
+                return;
+            }
+
+            var pack = ProtobufSerializer.DeserializeMainPack(data);
+            HandlePacket(pack);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[BattleClient] ProcessIncomingData error: {ex.Message}");
         }
     }
 
@@ -232,6 +274,12 @@ public class BattleClient : MonoBehaviour
                 if (pack.RpcPayload != null)
                     OnDeltaStateReceived?.Invoke(pack.RpcPayload);
                 break;
+
+            case ActionCode.RpcCall:
+                // 服务器 → 客户端 RPC 回程（技能 Confirm/Reject 等）
+                if (pack.RpcPayload != null)
+                    HandleServerRpc(pack.RpcPayload);
+                break;
         }
     }
 
@@ -253,6 +301,9 @@ public class BattleClient : MonoBehaviour
 
         BattleId = battleInfo.BattleId;
         BattlePlayerId = localPlayerId;
+
+        // 建立 KCP 可靠会话（conv = BattleId，服务器 BattleReady 时同步建立）
+        _kcp = null; // 连接后重建（需要 _serverEndpoint）
 
         // 玩家名字表（记分板/击杀播报用）
         _playerNames.Clear();
@@ -291,6 +342,67 @@ public class BattleClient : MonoBehaviour
     }
 
     /// <summary>
+    /// 发送 RPC 调用（路径 X）：MainPack{RpcCall, RpcPayload} → .NET 服务器。
+    /// 由 NetworkIntegrationBridge 接到 NetworkBehaviour.SendServerRpcTransport。
+    /// </summary>
+    public void SendRpcCall(byte[] rpcPayload)
+    {
+        var pack = new MainPack
+        {
+            RequestCode = RequestCode.Battle,
+            ActionCode = ActionCode.RpcCall,
+            RpcPayload = rpcPayload
+        };
+        // RPC 走 KCP 可靠通道（不能丢）；未就绪时回退原始 UDP
+        if (_kcp != null && IsConnected)
+            _kcp.SendReliable(ProtobufSerializer.SerializeMainPack(pack));
+        else
+            Send(pack);
+    }
+
+    /// <summary>
+    /// 处理服务器 → 客户端 RPC 回程：payload = NetId(4)+MethodHash(8)+reqId(4)+参数。
+    /// 按 methodHash 分发到本地处理器（技能 Confirm/Reject 等）。
+    /// </summary>
+    private void HandleServerRpc(byte[] payload)
+    {
+        try
+        {
+            var reader = new PacketReader(payload);
+            reader.ReadUInt32();            // NetId（客户端本地静态分发，不使用）
+            long methodHash = reader.ReadInt64();
+            reader.ReadUInt32();            // reqId（Fire-and-Forget）
+
+            long confirmHash = ShootingGame.Network.RpcMethodHash.Compute(
+                "global::PlayerCombatBehaviour.ConfirmAbility(System.Int32,System.Int32)");
+            long rejectHash = ShootingGame.Network.RpcMethodHash.Compute(
+                "global::PlayerCombatBehaviour.RejectAbility(System.Int32)");
+
+            if (methodHash == confirmHash)
+            {
+                int predictedId = reader.ReadInt32();
+                int instanceId = reader.ReadInt32();
+                Debug.Log($"[BattleClient] ServerRpc ConfirmAbility pred={predictedId} instance={instanceId}");
+                ProceduralEffectManager.Instance?.OnAbilityConfirmed(predictedId);
+            }
+            else if (methodHash == rejectHash)
+            {
+                int predictedId = reader.ReadInt32();
+                Debug.Log($"[BattleClient] ServerRpc RejectAbility pred={predictedId}");
+                ProceduralEffectManager.Instance?.OnAbilityRejected(predictedId);
+            }
+            else
+            {
+                Debug.LogWarning($"[BattleClient] Unknown server RPC hash=0x{methodHash:X}");
+            }
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogError($"[BattleClient] HandleServerRpc error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// Send player operation to server.
     /// </summary>
     public void SendOperation(PlayerOperation operation, int clientFrameId)
@@ -304,11 +416,6 @@ public class BattleClient : MonoBehaviour
             }
         }
 
-        // 诊断：序列化前打印 PlayerOperation 值
-        if (clientFrameId <= 10 || clientFrameId % 30 == 0)
-        {
-            Debug.Log($"[BC-SEND] tick={clientFrameId} MoveX={operation.MoveX:F6} MoveY={operation.MoveY:F6} AimYaw={operation.AimYaw:F6} Fire={operation.Fire} Jump={operation.Jump} Run={operation.Run} Aim={operation.Aim} Reload={operation.Reload}");
-        }
 
         var pack = new MainPack
         {
@@ -359,7 +466,6 @@ public class BattleClient : MonoBehaviour
 
         ServerFrameId = pack.BattleInfo.OperationId;
 
-        // Process all frames
         foreach (var frame in pack.BattleInfo.AllPlayerOperations)
         {
             if (frame.FrameId > _lastReceivedFrame)

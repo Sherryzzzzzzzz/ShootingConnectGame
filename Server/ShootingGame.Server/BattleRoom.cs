@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
+using ShootingGame.Network;
 using ShootingGame.Shared.Math;
 using ShootingGame.Shared.Protocol;
 using ShootingGame.Shared.Simulation;
@@ -51,6 +52,8 @@ namespace ShootingGame.Server
         private readonly Dictionary<int, InputBuffer> _inputBuffers = new Dictionary<int, InputBuffer>();
         private readonly Dictionary<int, int> _lastConsumedFrame = new Dictionary<int, int>();
         private readonly Dictionary<int, bool> _prevJumpHeld = new Dictionary<int, bool>();
+        // 跳跃边沿事件队列（HandlePlayerOperation 检测，ProcessFrame 应用，避免输入消费时序丢失）
+        private readonly HashSet<int> _pendingJumps = new HashSet<int>();
 
         // Attack retransmission
         private readonly Dictionary<int, int> _lastProcessedAttackId = new Dictionary<int, int>();
@@ -84,7 +87,6 @@ namespace ShootingGame.Server
         // Respawn system
         private readonly Dictionary<int, float> _respawnTimers = new Dictionary<int, float>();
         private readonly Dictionary<int, Vec3> _spawnPositions = new Dictionary<int, Vec3>();  // 记录出生位置，用于卡点检测
-        private readonly Dictionary<int, int> _stuckTicks = new Dictionary<int, int>();          // 持续未移动的 tick 数
         private List<SpawnPoint> _team1SpawnPoints;
         private List<SpawnPoint> _team2SpawnPoints;
         private List<SpawnPoint> _anySpawnPoints;
@@ -100,8 +102,6 @@ namespace ShootingGame.Server
         private readonly List<AbilityEventData> _pendingAbilityConfirmations = new List<AbilityEventData>();
 
         // Input receive rate logging
-        private readonly Dictionary<int, int> _inputReceiveRate = new Dictionary<int, int>();
-        private DateTime _lastInputRateLog = DateTime.UtcNow;
 
         // Collision world
         private CollisionWorld _collisionWorld;
@@ -129,6 +129,26 @@ namespace ShootingGame.Server
         };
 
         public int BattleId => Context.BattleId;
+        public bool IsStarted => _hasStarted;
+
+        /// <summary>强制开始（跳过 BattleReady 握手，用于英雄确认后直接开始）</summary>
+        public void ForceStart()
+        {
+            if (!_hasStarted)
+            {
+                _hasStarted = true;
+                // 用 bpId（与 HandleBattleReady 一致），避免 _playerReady key 混乱
+                foreach (var player in Context.Players)
+                {
+                    int bpId = Context.GetBattlePlayerId(player.UserId);
+                    _playerReady[bpId] = true;
+                }
+                // 完整启动：广播 BattleStart + 启动帧循环
+                BroadcastBattleStart();
+                StartFrameLoop();
+                Console.WriteLine($"[BattleRoom] ForceStart: battle {BattleId} started, frame loop launched");
+            }
+        }
 
         /// <summary>
         /// Set the RTT provider callback so the room can use per-player RTT.
@@ -143,7 +163,57 @@ namespace ShootingGame.Server
             Context = context;
             _matchMaker = matchMaker;
 
+            RegisterAbilityRpcHandlers();
             InitializeBattle();
+        }
+
+        /// <summary>
+        /// 技能预测确认链（RPC 版）：客户端预测施法 → [ServerRpc] RequestActivateAbility
+        /// → 服务器验证 + 激活 AbilityLifecycleSystem → 回程 Confirm/Reject（[ClientRpc] 语义）。
+        /// 特效由客户端程序化生成，Confirm 保留 / Reject 回滚。
+        /// </summary>
+        private void RegisterAbilityRpcHandlers()
+        {
+            RegisterRpcHandler("global::PlayerCombatBehaviour", "RequestActivateAbility",
+                new[] { "System.Int32", "System.Int32" }, (bpId, r) =>
+            {
+                int assetId = r.ReadInt32();
+                int predictedId = r.ReadInt32();
+                if (!_hasStarted || _hasEnded)
+                    return;
+                if (_disconnectedPlayers.Contains(bpId))
+                    return;
+
+                // 服务器权威验证 + 激活（复用现有 AbilityLifecycleSystem）
+                ushort instanceId = _ecsWorld.TryActivateAbility(bpId, (byte)assetId);
+                if (instanceId > 0)
+                {
+                    // ConfirmAbility(predictedId, instanceId)：客户端用 predictedId 匹配预测特效
+                    SendClientRpc(bpId,
+                        RpcMethodHash.Compute("global::PlayerCombatBehaviour.ConfirmAbility(System.Int32,System.Int32)"),
+                        predictedId, instanceId);
+                    Console.WriteLine($"[RPC] Skill: bp{bpId} assetId={assetId} pred={predictedId} -> Confirm instance={instanceId}");
+                }
+                else
+                {
+                    // RejectAbility(predictedId)：客户端回滚预测特效
+                    SendClientRpc(bpId,
+                        RpcMethodHash.Compute("global::PlayerCombatBehaviour.RejectAbility(System.Int32)"),
+                        predictedId);
+                    Console.WriteLine($"[RPC] Skill: bp{bpId} assetId={assetId} pred={predictedId} -> Reject");
+                }
+            });
+        }
+
+        /// <summary>服务器 → 客户端 RPC 回程（payload = NetId + MethodHash + reqId + 参数，与生成代理格式一致）</summary>
+        private void SendClientRpc(int bpId, long methodHash, params int[] args)
+        {
+            var w = new PacketWriter();
+            w.WriteUInt32((uint)bpId);   // NetId 低 16 位 = bpId
+            w.WriteInt64(methodHash);
+            w.WriteUInt32(0);            // reqId = 0（Fire-and-Forget）
+            foreach (var a in args) w.WriteInt32(a);
+            OnSendClientRpc?.Invoke(bpId, w.ToArray());
         }
 
         private void InitializeBattle()
@@ -204,25 +274,21 @@ namespace ShootingGame.Server
                     {
                         int idx = _spawnRng.Next(_team1SpawnPoints.Count);
                         spawnPos = _team1SpawnPoints[idx].Position;
-                        Console.WriteLine($"[Spawn] bp{bpId} Team1 pool idx={idx}/{_team1SpawnPoints.Count} pos=({spawnPos.x:F1},{spawnPos.z:F1})");
                     }
                     else if (!IsDeathmatch && player.TeamId == 2 && _team2SpawnPoints.Count > 0)
                     {
                         int idx = _spawnRng.Next(_team2SpawnPoints.Count);
                         spawnPos = _team2SpawnPoints[idx].Position;
-                        Console.WriteLine($"[Spawn] bp{bpId} Team2 pool idx={idx}/{_team2SpawnPoints.Count} pos=({spawnPos.x:F1},{spawnPos.z:F1})");
                     }
                     else if (_anySpawnPoints.Count > 0)
                     {
                         int idx = _spawnRng.Next(_anySpawnPoints.Count);
                         spawnPos = _anySpawnPoints[idx].Position;
-                        Console.WriteLine($"[Spawn] bp{bpId} Any pool idx={idx}/{_anySpawnPoints.Count} pos=({spawnPos.x:F1},{spawnPos.z:F1})");
                     }
                     else
                     {
                         int idx = _spawnRng.Next(DefaultSpawnPositions.Length);
                         spawnPos = DefaultSpawnPositions[idx];
-                        Console.WriteLine($"[Spawn] bp{bpId} Defaults idx={idx}");
                     }
 
                     _playerSnapshots[bpId] = PlayerSnapshot.Default(spawnPos);
@@ -231,7 +297,6 @@ namespace ShootingGame.Server
                     ApplyGunToSnapshot(ref snap, _playerGuns.GetValueOrDefault(bpId));
                     _playerSnapshots[bpId] = snap;
                     _spawnPositions[bpId] = spawnPos;
-                    _stuckTicks[bpId] = 0;
 
                     // Initialize input buffer
                     _inputBuffers[bpId] = new InputBuffer();
@@ -275,23 +340,23 @@ namespace ShootingGame.Server
 
                 Log($"Player {battlePlayerId} ready in battle {BattleId}");
 
-                // Check if all players are ready
-                bool allReady = true;
-                foreach (var ready in _playerReady.Values)
-                {
-                    allReady = allReady && ready;
-                }
+                // 先给发 BattleReady 的客户端回 BattleStart（不等全员）
+                SendBattleStart(battlePlayerId, endpoint);
 
-                if (allReady && !_hasStarted)
+                // 全员就绪后启动帧循环
+                if (!_hasStarted && _playerReady.Values.Count >= Context.Players.Count)
                 {
-                    _hasStarted = true;
-                    BroadcastBattleStart();
-                    StartFrameLoop();
-                }
-                else if (_hasStarted)
-                {
-                    // Battle already started, send BattleStart to this player
-                    SendBattleStart(battlePlayerId, endpoint);
+                    bool allReady = true;
+                    foreach (var ready in _playerReady.Values)
+                        allReady = allReady && ready;
+
+                    if (allReady)
+                    {
+                        _hasStarted = true;
+                        Log($"[BattleRoom] All {Context.Players.Count} players ready, starting frame loop");
+                        BroadcastBattleStart();
+                        StartFrameLoop();
+                    }
                 }
             }
         }
@@ -299,6 +364,57 @@ namespace ShootingGame.Server
         /// <summary>
         /// Handle player input operation.
         /// </summary>
+        /// <summary>
+        /// RPC 入口（路径 X）：客户端 RpcCall 包经 BattleUdpServer 路由到此。
+        /// 解析 NetId + MethodHash → 按 methodHash 分发到服务器侧处理器。
+        /// </summary>
+        public event Action<int, long> OnRpcCallReceived; // (battlePlayerId, methodHash) 供测试/日志观测
+        public event Action<int, byte[]> OnSendClientRpc; // (battlePlayerId, payload) 服务器→客户端 RPC 回程
+        private readonly Dictionary<long, Action<int, PacketReader>> _rpcHandlers = new Dictionary<long, Action<int, PacketReader>>();
+
+        /// <summary>注册服务器侧 RPC 处理器（签名与客户端 [ServerRpc] 方法一致）</summary>
+        public void RegisterRpcHandler(string fullTypeName, string methodName, string[] paramTypes, Action<int, PacketReader> handler)
+        {
+            string sig = ShootingGame.Network.RpcMethodHash.BuildSignature(fullTypeName, methodName, paramTypes);
+            long hash = ShootingGame.Network.RpcMethodHash.Compute(sig);
+            _rpcHandlers[hash] = handler;
+            Console.WriteLine($"[RPC] Registered handler 0x{hash:X16} : {sig}");
+        }
+
+        public void HandleRpcCall(int battlePlayerId, byte[] payload)
+        {
+            lock (_lock)
+            {
+                if (!_hasStarted || _hasEnded)
+                    return;
+                if (_disconnectedPlayers.Contains(battlePlayerId))
+                    return;
+
+                if (payload.Length < 12) return; // NetId(4) + MethodHash(8) 最小头部
+                try
+                {
+                    var reader = new PacketReader(payload);
+                    uint netId = reader.ReadUInt32();
+                    long methodHash = reader.ReadInt64();
+                    reader.ReadUInt32(); // reqId（生成代理格式：NetId + MethodHash + reqId + args）
+                    Console.WriteLine($"[RPC] bp{battlePlayerId} -> netId={netId} methodHash=0x{methodHash:X8} payload={payload.Length}B");
+                    OnRpcCallReceived?.Invoke(battlePlayerId, methodHash);
+
+                    if (_rpcHandlers.TryGetValue(methodHash, out var handler))
+                    {
+                        handler(battlePlayerId, reader);
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[RPC] No handler for methodHash=0x{methodHash:X8} from bp{battlePlayerId}");
+                    }                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[RPC] Parse error from bp{battlePlayerId}: {ex.Message}");
+                }
+            }
+        }
+
         public void HandlePlayerOperation(int battlePlayerId, PlayerOperation operation, int clientFrameId, int clientAckedFrame)
         {
             lock (_lock)
@@ -329,6 +445,10 @@ namespace ShootingGame.Server
                     }
                     _prevJumpHeld[battlePlayerId] = operation.Jump;
 
+                    // 跳跃边沿 → 事件队列（ProcessFrame 应用，确保不丢）
+                    if (jumpEdge)
+                        _pendingJumps.Add(battlePlayerId);
+
                     var input = new InputFrame
                     {
                         Tick = clientFrameId,
@@ -344,50 +464,23 @@ namespace ShootingGame.Server
                     };
                     inputBuffer.Store(input);
 
-                    // 诊断：前60帧每帧打印，之后每30帧打印
-                    if (clientFrameId <= 60 || clientFrameId % 30 == 0)
-                    {
-                        Console.WriteLine($"[SRV-RECV] bp={battlePlayerId} tick={clientFrameId} aimYaw={operation.AimYaw:F1} aim={operation.Aim} run={operation.Run} fire={operation.Fire} jump={operation.Jump} move=({operation.MoveX:F6},{operation.MoveY:F6})");
-                    }
                 }
 
-                // Track input receive rate
-                if (!_inputReceiveRate.ContainsKey(battlePlayerId))
-                    _inputReceiveRate[battlePlayerId] = 0;
-                _inputReceiveRate[battlePlayerId]++;
 
-                // Log every 5 seconds
-                if ((DateTime.UtcNow - _lastInputRateLog).TotalSeconds > 5)
-                {
-                    _lastInputRateLog = DateTime.UtcNow;
-                    foreach (var kvp in _inputReceiveRate)
-                    {
-                        Console.WriteLine($"[BattleRoom {BattleId}] Input rate: bp{kvp.Key} = {kvp.Value / 5f:F1} inputs/sec");
-                        _inputReceiveRate[kvp.Key] = 0;
-                    }
-                }
 
                 // Process attacks (deduplication)
                 if (operation.AttackOperations != null && operation.AttackOperations.Count > 0)
                 {
-                    // 战斗前3秒使用宽松超时(30帧≈500ms)，之后恢复正常(8帧≈133ms)
-                    int maxDelay = _frameId <= 180 ? 30 : 8;
-
                     foreach (var atk in operation.AttackOperations)
                     {
-                        // Timeout check
-                        int delay = _frameId - atk.ClientFrameId;
-                        if (atk.ClientFrameId > 0 && delay > maxDelay)
-                        {
-                            Log($"[AttackTimeout] bp={battlePlayerId} attackId={atk.AttackId} delay={delay} maxDelay={maxDelay}");
-                            continue;
-                        }
-
-                        // Dedup
+                        // 去重：只接受比上次更新的 AttackId
                         if (atk.AttackId > _lastProcessedAttackId[battlePlayerId])
                         {
                             _pendingAttacks[battlePlayerId].Add(atk);
                             _lastProcessedAttackId[battlePlayerId] = atk.AttackId;
+                        }
+                        else
+                        {
                         }
                     }
                 }
@@ -435,25 +528,37 @@ namespace ShootingGame.Server
 
             lock (_lock)
             {
+                // 玩家还没通过 UDP 连上战斗（BattleReady 未到）→ 不判负，等重连或清理
+                if (!_playerEndpoints.ContainsKey(bpId))
+                {
+                    Log($"Player {bpId} (userId={userId}) disconnected BEFORE UDP battle join. Marking rejoin-pending.");
+                    _playerReady.Remove(bpId);
+                    return;
+                }
+
                 _disconnectedPlayers.Add(bpId);
                 _playerReady.Remove(bpId);
                 _playerIsDead[bpId] = true;
 
                 Log($"Player {bpId} (userId={userId}) disconnected");
 
-                // 检查是否所有玩家都已断开或死亡
+                // 检查是否所有玩家都已断开或死亡（只统计已通过 UDP 加入的玩家）
                 if (!_hasEnded)
                 {
                     bool allDown = true;
+                    bool anyJoined = false;
                     foreach (var kvp in _playerSnapshots)
                     {
+                        if (!_playerEndpoints.ContainsKey(kvp.Key))
+                            continue; // 还没连上 UDP，不算
+                        anyJoined = true;
                         if (!_disconnectedPlayers.Contains(kvp.Key) && !_playerIsDead.GetValueOrDefault(kvp.Key, false))
                         {
                             allDown = false;
                             break;
                         }
                     }
-                    if (allDown)
+                    if (allDown && anyJoined)
                     {
                         Log($"All players down, ending battle {BattleId}");
                         EndBattle();
@@ -540,8 +645,15 @@ namespace ShootingGame.Server
                             }
                             else
                             {
-                                ProcessFrame();
-                                _frameId++;
+                                try
+                                {
+                                    ProcessFrame();
+                                    _frameId++;
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"[BattleRoom] ProcessFrame ERROR: {ex.Message}\n{ex.StackTrace}");
+                                }
                             }
                         }
 
@@ -583,7 +695,15 @@ namespace ShootingGame.Server
 
                 var snapshot = kvp.Value;
                 var inputBuffer = _inputBuffers[bpId];
-                var input = inputBuffer.Get(_frameId);
+                var input = inputBuffer.ConsumeNext();
+
+                // 应用跳跃边沿事件（事件驱动，不依赖输入消费时序）
+                if (_pendingJumps.Contains(bpId))
+                {
+                    input.Jump = true;
+                    _pendingJumps.Remove(bpId);
+                }
+
                 _playerIsAiming[bpId] = input.Aim;
                 _playerIsCrouching[bpId] = input.Crouch;
 
@@ -602,10 +722,7 @@ namespace ShootingGame.Server
                     Reload = input.Reload
                 };
 
-                // 诊断: 记录模拟前的旋转
-                float rotBefore = snapshot.Rotation.EulerAngles.y;
-
-                // ECS-based simulation
+                // === 服务器权威模拟（用共享 PlayerSystemGroup，双端一致）===
                 var entity = _ecsWorld.GetEntity(bpId);
                 if (entity.IsValid && _ecsWorld.EntityManager.IsValid(entity))
                 {
@@ -618,30 +735,6 @@ namespace ShootingGame.Server
                 }
                 _playerSnapshots[bpId] = snapshot;
 
-                // 卡点检测：出生后 180 ticks(3秒) 内移动 <0.5m → 自动重新复活
-                if (_spawnPositions.TryGetValue(bpId, out var sp))
-                {
-                    float distFromSpawn = Vec3.Distance(snapshot.Position, sp);
-                    if (distFromSpawn < 0.5f && snapshot.Health > 0 && !_playerIsDead[bpId])
-                    {
-                        _stuckTicks[bpId] = _stuckTicks.GetValueOrDefault(bpId) + 1;
-                        if (_stuckTicks[bpId] >= 180)
-                        {
-                            Log($"[Stuck] bp{bpId} 出生后 3s 未移动 {distFromSpawn:F2}m，强制重新复活");
-                            RespawnPlayer(bpId);
-                        }
-                    }
-                    else
-                    {
-                        _stuckTicks[bpId] = 0; // 移动了，重置
-                    }
-                }
-
-                float rotAfter = snapshot.Rotation.EulerAngles.y;
-                if (_frameId <= 10 || _frameId % 60 == 0)
-                    Console.WriteLine($"[SIM] bp={bpId} frame={_frameId} inputAimYaw={input.AimYaw:F1} rotBefore={rotBefore:F1} rotAfter={rotAfter:F1} dt={_frameInterval:F4}");
-
-                // Record position for lag compensation
                 RecordPosition(bpId, snapshot.Position);
 
                 // Merge pending attacks
@@ -691,6 +784,26 @@ namespace ShootingGame.Server
 
             // 8. Broadcast frame
             BroadcastFrame(frameOp);
+        }
+
+        /// <summary>
+        /// 伤害后同步到快照 + ECS HealthComponent，防止 GetSnapshot 每帧从 ECS 读回初始 HP。
+        /// </summary>
+        private void ApplyDamageToSnapshotAndECS(int targetId, int hp)
+        {
+            if (_playerSnapshots.TryGetValue(targetId, out var targetSnap))
+            {
+                targetSnap.Health = (byte)hp;
+                _playerSnapshots[targetId] = targetSnap;
+            }
+            var e = _ecsWorld.GetEntity(targetId);
+            if (e.IsValid && _ecsWorld.EntityManager.IsValid(e) &&
+                _ecsWorld.EntityManager.TryGetComponent<HealthComponent>(e, out var hc))
+            {
+                hc.Current = (byte)hp;
+                hc.Max = (byte)Math.Max(hc.Max, hp);
+                _ecsWorld.EntityManager.SetComponent(e, hc);
+            }
         }
 
         private void RecordPosition(int bpId, Vec3 pos)
@@ -892,6 +1005,8 @@ namespace ShootingGame.Server
                                 int hp = _playerHp[targetId] - damage;
                                 hp = Math.Max(0, hp);
                                 _playerHp[targetId] = hp;
+                                // 同步到快照 + ECS（否则 GetSnapshot 每帧从 ECS 读回初始值，HP 反复回满）
+                                ApplyDamageToSnapshotAndECS(targetId, hp);
 
                                 bool isKill = hp <= 0;
                                 if (isKill)
@@ -1012,6 +1127,8 @@ namespace ShootingGame.Server
                         int hp = _playerHp[targetId] - damage;
                         hp = Math.Max(0, hp);
                         _playerHp[targetId] = hp;
+                        // 同步到快照 + ECS
+                        ApplyDamageToSnapshotAndECS(targetId, hp);
 
                         bool isKill = hp <= 0;
                         if (isKill)
@@ -1092,7 +1209,6 @@ namespace ShootingGame.Server
             _ecsWorld.RegisterPlayer(bpId, snap, heroConfig);
 
             _spawnPositions[bpId] = spawnPos;
-            _stuckTicks[bpId] = 0;
             Log($"Player {bpId} respawned at ({spawnPos.x:F1}, {spawnPos.y:F1}, {spawnPos.z:F1})");
         }
 
@@ -1161,6 +1277,13 @@ namespace ShootingGame.Server
 
         private bool IsTeamEliminated()
         {
+            // 还有玩家未通过 UDP 加入（BattleReady 未到）且未断开 → 不判定胜负（可能在加载场景）
+            foreach (var bpId in _playerTeams.Keys)
+            {
+                if (!_playerEndpoints.ContainsKey(bpId) && !_disconnectedPlayers.Contains(bpId))
+                    return false;
+            }
+
             bool team1Alive = false, team2Alive = false;
             foreach (var kvp in _playerTeams)
             {
@@ -1191,12 +1314,6 @@ namespace ShootingGame.Server
                 float speed = snap.Velocity.Magnitude;
                 bool isRunning = speed > GameConstants.MoveSpeed + 0.1f;
 
-                // 诊断: 前20帧每帧打印，之后每60帧
-                if (_frameId <= 20 || _frameId % 60 == 0)
-                {
-                    var rawQuat = snap.Rotation;
-                    Console.WriteLine($"[SRV-STATE] bp={bpId} frame={_frameId} rotY={rotationY:F1} quat=({rawQuat.x:F3},{rawQuat.y:F3},{rawQuat.z:F3},{rawQuat.w:F3}) running={isRunning} pos=({snap.Position.x:F2},{snap.Position.z:F2})");
-                }
 
                 // 收集能力实例数据
                 List<AbilityInstanceData> activeAbilities = null;
@@ -1214,8 +1331,8 @@ namespace ShootingGame.Server
                 {
                     PlayerId = bpId,
                     Position = snap.Position,
-                    Hp = _playerHp.GetValueOrDefault(bpId, 100),
-                    IsDead = _playerIsDead.GetValueOrDefault(bpId, false),
+                    Hp = snap.Health,
+                    IsDead = snap.Health <= 0,
                     Velocity = snap.Velocity,
                     VerticalVelocity = snap.VerticalVelocity,
                     IsGrounded = snap.IsGrounded,
@@ -1243,7 +1360,7 @@ namespace ShootingGame.Server
                 int bpId = kvp.Key;
                 string endpoint = kvp.Value;
 
-                // Build packet
+                // 构建包
                 var pack = new MainPack
                 {
                     RequestCode = RequestCode.Battle,
@@ -1255,16 +1372,11 @@ namespace ShootingGame.Server
                     }
                 };
 
-                // Add frames from last acked
-                int ackedFrame = _playerAckedFrame.GetValueOrDefault(bpId, 0);
-                int startFrame = Math.Max(ackedFrame + 1, _frameId - 5);
-
-                for (int f = startFrame; f <= _frameId; f++)
+                // 只广播最新 1 帧（不做 ack 补发——客户端插值缓冲自行平滑丢帧，
+                // 避免 ack 落后时一次广播几十帧淹没客户端主线程）
+                if (_frameHistory.TryGetValue(_frameId, out var historyFrame))
                 {
-                    if (_frameHistory.TryGetValue(f, out var historyFrame))
-                    {
-                        pack.BattleInfo.AllPlayerOperations.Add(historyFrame);
-                    }
+                    pack.BattleInfo.AllPlayerOperations.Add(historyFrame);
                 }
 
                 // Add hit events

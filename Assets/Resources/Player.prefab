@@ -1854,10 +1854,6 @@ PrefabInstance:
     - targetCorrespondingSourceObject: {fileID: 919132149155446097, guid: ec670c9fabeb8364dacb292a1113e9d8,
         type: 3}
       insertIndex: -1
-      addedObject: {fileID: 1845467918233275424}
-    - targetCorrespondingSourceObject: {fileID: 919132149155446097, guid: ec670c9fabeb8364dacb292a1113e9d8,
-        type: 3}
-      insertIndex: -1
       addedObject: {fileID: 2903712427732677637}
     - targetCorrespondingSourceObject: {fileID: 919132149155446097, guid: ec670c9fabeb8364dacb292a1113e9d8,
         type: 3}
@@ -1884,47 +1880,6 @@ GameObject:
     type: 3}
   m_PrefabInstance: {fileID: 1270196737227431422}
   m_PrefabAsset: {fileID: 0}
---- !u!114 &1845467918233275424
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2117198570896498863}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 2a7fdc3d24c841141a4efd7b5081348f, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  animancer: {fileID: 0}
-  animator: {fileID: 4668597402218635375}
-  AnimationSet: {fileID: 11400000, guid: 472e430870b20884197df1a34f85dfbb, type: 2}
-  normal: {fileID: 0}
-  aim: {fileID: 0}
-  aimImage: {fileID: 0}
-  aimLayer:
-    serializedVersion: 2
-    m_Bits: 64
-  aimTarget: {fileID: 0}
-  fireMode: 0
-  shotgunPellets: 6
-  shotgunSpread: 5
-  firePoint: {fileID: 3939913571083693501}
-  fireRate: 0.2
-  muzzleFlash: {fileID: 794933298790381356}
-  shellPrefab: {fileID: 6617110212633058271, guid: bc2d43b3e893aff40903eb8626030af0,
-    type: 3}
-  shellEjectPoint: {fileID: 0}
-  recoilAnimator: {fileID: 0}
-  fireSoundClip: {fileID: 8300000, guid: 879d6ec9c3076334986f1a4a975a908b, type: 3}
-  impulseSource: {fileID: 0}
-  isLocalPlayer: 1
-  walkSpeed: 2
-  runSpeed: 5
-  jumpHeight: 1.2
-  gravity: -9.81
-  rotationSpeed: 72
-  gravityVector: {x: 0, y: 0, z: 0}
 --- !u!114 &2903712427732677637
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1940,22 +1895,6 @@ MonoBehaviour:
   _Animator: {fileID: 4668597402218635375}
   _Transitions: {fileID: 0}
   _ActionOnDisable: 0
---- !u!114 &7238234240016066050
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2117198570896498863}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: c857df7ec0da89a4aae4b5281fd8edf3, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  battleClient: {fileID: 0}
-  smoothingSpeed: 30
-  snapThreshold: 2
-  enableDebugLog: 0
 --- !u!114 &3636218087382062339
 MonoBehaviour:
   m_ObjectHideFlags: 0

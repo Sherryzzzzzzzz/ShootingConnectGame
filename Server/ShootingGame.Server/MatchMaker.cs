@@ -110,12 +110,19 @@ namespace ShootingGame.Server
                     return false;
                 }
 
-                if (_userToBattleId.ContainsKey(client.UserId))
+                if (_userToBattleId.TryGetValue(client.UserId, out int staleBattleId))
                 {
-                    // 玩家不在队列但注册在战斗中 → 可能是残留的未启动战斗
-                    int staleBattleId = _userToBattleId[client.UserId];
-                    Log($"Player {client.UserId} has stale battle entry (battle {staleBattleId}), auto-cleaning for re-queue");
-                    CleanupStaleBattleEntries(staleBattleId);
+                    // 只在 battle 已不在活跃列表时才清理（活跃 battle 不应被误删）
+                    if (!_activeBattles.ContainsKey(staleBattleId))
+                    {
+                        Log($"Player {client.UserId} has stale battle entry (battle {staleBattleId}), auto-cleaning for re-queue");
+                        CleanupStaleBattleEntries(staleBattleId);
+                    }
+                    else
+                    {
+                        Log($"Player {client.UserId} already in active battle {staleBattleId}, ignoring re-join queue");
+                        return false;
+                    }
                 }
 
                 var info = new MatchUserInfo
@@ -390,10 +397,12 @@ namespace ShootingGame.Server
             }
 
             // Include collision data (for small maps; clients can also load locally)
-            if (!string.IsNullOrEmpty(context.CollisionDataPath) && System.IO.File.Exists(context.CollisionDataPath))
-            {
-                bi.CollisionData = System.IO.File.ReadAllBytes(context.CollisionDataPath);
-            }
+            // 碰撞数据不下发（10MB 会撑爆 MatchFound 包，客户端从本地 StreamingAssets 加载同一文件）
+            // 如需下发，可改为分片或压缩后再传
+            //if (!string.IsNullOrEmpty(context.CollisionDataPath) && System.IO.File.Exists(context.CollisionDataPath))
+            //{
+            //    bi.CollisionData = System.IO.File.ReadAllBytes(context.CollisionDataPath);
+            //}
 
             return bi;
         }

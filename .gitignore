@@ -97,3 +97,29 @@ InitTestScene*.unity*
 
 # Auto-generated scenes by play mode tests
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
+
+# ==================== ShootingConnectGame 项目补充 ====================
+
+# .NET 编译产物（Server / SourceGenerators）
+**/[Bb]in/
+**/[Oo]bj/
+*.dll
+*.exe
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+
+# IDE 本地配置
+.idea/
+.vscode/
+*.slnx
+
+# 本机调试/临时文件
+*.DotSettings.user
+replay_*.log
+
+# 例外：项目依赖的二进制资产（必须跟踪）
+!Assets/Plugins/**/*.dll
+!Packages/**/*.dll
+!Assets/Plugins/**/*.pdb
+!Packages/**/*.pdb

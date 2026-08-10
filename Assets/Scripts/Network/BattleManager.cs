@@ -78,13 +78,6 @@ public class BattleManager : MonoBehaviour
 
     private void EnsureNetworkManagers()
     {
-        if (AttackManager.Instance == null)
-        {
-            var go = new GameObject("AttackManager");
-            go.AddComponent<AttackManager>();
-            Debug.Log("[BattleManager] 自动创建 AttackManager");
-        }
-
         if (AuthoritySync.Instance == null)
         {
             var go = new GameObject("AuthoritySync");
@@ -92,18 +85,18 @@ public class BattleManager : MonoBehaviour
             Debug.Log("[BattleManager] 自动创建 AuthoritySync");
         }
 
-        if (HitEventManager.Instance == null)
+        if (ClientBulletSystem.Instance == null)
         {
-            var go = new GameObject("HitEventManager");
-            go.AddComponent<HitEventManager>();
-            Debug.Log("[BattleManager] 自动创建 HitEventManager");
+            var go = new GameObject("ClientBulletSystem");
+            go.AddComponent<ClientBulletSystem>();
+            Debug.Log("[BattleManager] 自动创建 ClientBulletSystem");
         }
 
-        if (VisualBulletManager.Instance == null)
+        if (HitEventView.Instance == null)
         {
-            var go = new GameObject("VisualBulletManager");
-            go.AddComponent<VisualBulletManager>();
-            Debug.Log("[BattleManager] 自动创建 VisualBulletManager");
+            var go = new GameObject("HitEventView");
+            go.AddComponent<HitEventView>();
+            Debug.Log("[BattleManager] 自动创建 HitEventView");
         }
 
         if (AudioPoolManager.Instance == null)
@@ -125,6 +118,7 @@ public class BattleManager : MonoBehaviour
         if (LobbyClient.Instance != null)
         {
             LobbyClient.Instance.OnMatchFound += OnMatchFound;
+            LobbyClient.Instance.OnStartEnterBattle += OnStartEnterBattleReceived;
             Debug.Log("[BattleManager] Subscribed to LobbyClient.OnMatchFound");
 
             // 如果已经匹配成功，立即处理
@@ -159,6 +153,7 @@ public class BattleManager : MonoBehaviour
         if (LobbyClient.Instance != null)
         {
             LobbyClient.Instance.OnMatchFound -= OnMatchFound;
+            LobbyClient.Instance.OnStartEnterBattle -= OnStartEnterBattleReceived;
         }
 
         if (BattleClient.Instance != null)
@@ -224,6 +219,18 @@ public class BattleManager : MonoBehaviour
     #endregion
 
     #region 事件处理
+
+    /// <summary>全员确认后服务端广播 StartEnterBattle → 统一进入战斗场景</summary>
+    private void OnStartEnterBattleReceived(int battleId)
+    {
+        Debug.Log($"[BattleManager] StartEnterBattle received, battleId={battleId}");
+        if (_state == BattleState.Loading && _battleInfo != null)
+        {
+            // 停止可能仍在运行的选角等待协程，直接加载
+            StopAllCoroutines();
+            LoadBattleSceneDirectly(_battleInfo);
+        }
+    }
 
     private void OnMatchFound(BattleInfo info)
     {
@@ -303,11 +310,15 @@ public class BattleManager : MonoBehaviour
             LobbyClient.Instance.MatchedBattleInfo = null;
         }
 
-        // 从 BattleInfo 加载碰撞数据（服务端下发或本地文件优先）
+        // 碰撞数据：优先用服务端下发的（如有），否则用本地 StreamingAssets/collision.bin（CollisionWorldLoader.Awake 已加载）
         if (info.CollisionData != null && info.CollisionData.Length > 0)
         {
             CollisionWorldLoader.LoadFromBytes(info.CollisionData);
             Debug.Log($"[BattleManager] 从服务器加载碰撞数据: {info.CollisionData.Length} 字节");
+        }
+        else
+        {
+            Debug.Log($"[BattleManager] 使用本地碰撞数据: boxes={CollisionWorldLoader.Instance?.Count ?? 0}");
         }
 
         SetState(BattleState.Loading);
@@ -451,6 +462,9 @@ public class BattleManager : MonoBehaviour
         yield return null;
         yield return null;
 
+        // 确保场景只有一个活动渲染相机和一个 AudioListener（防止重复相机导致渲染/音频异常）
+        EnsureSingleCameraAndListener();
+
         Debug.Log("[BattleManager] 两帧后，场景就绪，发送 BattleReady");
         Debug.Log($"[BattleManager] BattleClient.Instance={(BattleClient.Instance != null ? "存在" : "NULL")}, _localBattlePlayerId={_localBattlePlayerId}");
 
@@ -468,6 +482,48 @@ public class BattleManager : MonoBehaviour
             bc.InitializeBattle(info, _localBattlePlayerId);
             Debug.Log("[BattleManager] BattleClient 已从恢复路径发送 BattleReady");
         }
+    }
+
+    /// <summary>
+    /// 战斗场景只保留一个活动渲染相机和一个 AudioListener。
+    /// 场景中可能存在多套相机 rig（如 EVM + Cinema），会同时渲染并产生双音频监听警告。
+    /// </summary>
+    private void EnsureSingleCameraAndListener()
+    {
+        var allCams = UnityEngine.Object.FindObjectsByType<Camera>(FindObjectsSortMode.None);
+        Camera keepCam = null;
+        foreach (var cam in allCams)
+        {
+            if (cam.enabled && cam.gameObject.activeInHierarchy)
+            {
+                keepCam = cam;
+                break;
+            }
+        }
+
+        // 禁用除主渲染相机外的相机 GameObject（其上的 AudioListener 也随之失效）
+        int disabledCameras = 0;
+        foreach (var cam in allCams)
+        {
+            if (cam == keepCam || !cam.gameObject.activeInHierarchy) continue;
+            cam.gameObject.SetActive(false);
+            disabledCameras++;
+        }
+
+        // 兜底：确保只剩一个活动 AudioListener
+        var listeners = UnityEngine.Object.FindObjectsByType<AudioListener>(FindObjectsSortMode.None);
+        bool kept = false;
+        int disabledListeners = 0;
+        foreach (var listener in listeners)
+        {
+            if (!listener.gameObject.activeInHierarchy || !listener.enabled) continue;
+            if (!kept) { kept = true; continue; }
+            listener.enabled = false;
+            disabledListeners++;
+        }
+
+        Debug.Log($"[BattleManager] 相机/音频修正: 保留相机={(keepCam != null ? keepCam.name : "无")}, " +
+                  $"禁用相机={disabledCameras}, 禁用监听器={disabledListeners}");
     }
 
     private System.Collections.IEnumerator InitBattleAfterSceneLoad(BattleInfo info)
@@ -621,7 +677,7 @@ public class BattleManager : MonoBehaviour
                 Debug.Log("[BattleManager] 为本地玩家添加 BodyPartHitbox");
             }
 
-            // 确保 PistolGirlStateMachine + AnimancerComponent 存在
+            // 确保 PlayerAnimationView + AnimancerComponent 存在（表现层薄壳）
             if (_localPlayer.GetComponent<Animancer.AnimancerComponent>() == null)
                 _localPlayer.AddComponent<Animancer.AnimancerComponent>();
             // Animancer 驱动 Body 上的 Animator
@@ -634,21 +690,12 @@ public class BattleManager : MonoBehaviour
                 bodyAnim.enabled = true;
                 Debug.Log($"[BattleManager] Body Animator: enabled={bodyAnim.enabled}, avatar={bodyAnim.avatar != null}, hasController={bodyAnim.runtimeAnimatorController != null}");
             }
-            var pg = _localPlayer.GetComponent<PistolGirlStateMachine>();
-            if (pg == null) pg = _localPlayer.AddComponent<PistolGirlStateMachine>();
-            pg.animSet = Resources.Load<PlayerAnimationSet>("PistolGirl_AnimSet");
-            pg.capsule = _localPlayer.GetComponent<CapsuleCollider>();
-            Debug.Log("[BattleManager] PG 已配置: animSet=" + (pg.animSet != null) + " bodyAnim=" + (bodyAnim != null));
-
-            var controller = _localPlayer.GetComponent<NetPlayerController>();
-            if (controller == null)
-            {
-                Debug.LogError("[BattleManager] ❌ 预制体缺少 NetPlayerController！请在 Player 预制体上添加 NetPlayerController。");
-            }
-            else if (heroConfig != null)
-            {
-                controller.HeroConfig = heroConfig;
-            }
+            var animView = _localPlayer.GetComponent<PlayerAnimationView>();
+            if (animView == null) animView = _localPlayer.AddComponent<PlayerAnimationView>();
+            animView.animSet = Resources.Load<PlayerAnimationSet>("PistolGirl_AnimSet");
+            animView.capsule = _localPlayer.GetComponent<CapsuleCollider>();
+            animView.BindCamera(); // 只在本地玩家接管相机（远程玩家不调用）
+            Debug.Log("[BattleManager] AnimationView 已配置: animSet=" + (animView.animSet != null));
 
             if (_localPlayer.GetComponent<CursorControl>() == null)
             {
@@ -658,11 +705,14 @@ public class BattleManager : MonoBehaviour
             // 将场景中的 CinemachineFreeLook 摄像机的 Follow/LookAt 设置到本地玩家
             SetupFreeLookCamera(_localPlayer);
 
-            // 重新刷新摄像机引用（Start 在 Instantiate 时已执行，当时 FreeLook 尚未配置）
-            if (controller != null)
+            // 注册到 ECS 世界（含表现组件）
+            var world = FindFirstObjectByType<ClientECSWorld>();
+            if (world == null)
             {
-                controller.RefreshCamera();
+                var go = new GameObject("ClientECSWorld");
+                world = go.AddComponent<ClientECSWorld>();
             }
+            world.RegisterLocalPlayer(_localBattlePlayerId, position.ToShared(), heroConfig, _localPlayer);
 
             // 应用选角界面的外观选择
             HeroAppearanceApplier.Apply(_localPlayer,
@@ -673,14 +723,17 @@ public class BattleManager : MonoBehaviour
             return;
         }
 
-        // 回退：查找场景中已有的 NetPlayerController
-        var existingController = FindFirstObjectByType<NetPlayerController>();
-        if (existingController != null)
+        // 回退：查找场景中已有的 ClientECSWorld 本地玩家
+        var existingWorld = FindFirstObjectByType<ClientECSWorld>();
+        if (existingWorld != null && existingWorld.LocalPlayerId >= 0)
         {
-            _localPlayer = existingController.gameObject;
+            _localPlayer = FindFirstObjectByType<PlayerAnimationView>()?.gameObject;
+            if (_localPlayer == null)
+            {
+                _localPlayer = new GameObject($"LocalPlayer_{_localBattlePlayerId}");
+            }
             _localPlayer.name = $"LocalPlayer_{_localBattlePlayerId}";
-            existingController.transform.position = position;
-            existingController.RefreshCamera();
+            _localPlayer.transform.position = position;
 
             Debug.Log($"[BattleManager] 使用场景中已有的本地玩家，位置: {position}");
             return;
@@ -699,9 +752,9 @@ public class BattleManager : MonoBehaviour
         var go = new GameObject($"LocalPlayer_{_localBattlePlayerId}");
         go.transform.position = position;
 
-        // 添加角色控制器所需的组件
-        var controller = go.AddComponent<NetPlayerController>();
-
+        // 添加表现层薄壳
+        var animView = go.AddComponent<PlayerAnimationView>();
+        animView.animSet = Resources.Load<PlayerAnimationSet>("PistolGirl_AnimSet");
 
         // 添加基础可视表示
         var capsule = GameObject.CreatePrimitive(PrimitiveType.Capsule);
@@ -711,6 +764,15 @@ public class BattleManager : MonoBehaviour
         // 移除碰撞体，使用网络模拟
         var capsuleCollider = capsule.GetComponent<CapsuleCollider>();
         if (capsuleCollider != null) UnityEngine.Object.Destroy(capsuleCollider);
+
+        // 注册到 ECS 世界
+        var world = FindFirstObjectByType<ClientECSWorld>();
+        if (world == null)
+        {
+            var go2 = new GameObject("ClientECSWorld");
+            world = go2.AddComponent<ClientECSWorld>();
+        }
+        world.RegisterLocalPlayer(_localBattlePlayerId, position.ToShared(), null, go);
 
         Debug.Log($"[BattleManager] 创建基础本地玩家，位置: {position}");
         return go;
@@ -733,22 +795,11 @@ public class BattleManager : MonoBehaviour
             var go = Instantiate(prefabToUse, position, Quaternion.identity);
             go.name = $"RemotePlayer_{playerId}";
 
-            // 远程玩家不能有 NetPlayerController（预制体自带的必须禁用，否则会和本地玩家抢输入）
-            var remoteNpc = go.GetComponent<NetPlayerController>();
-            if (remoteNpc != null) { remoteNpc.enabled = false; Debug.Log($"[BattleManager] 禁用 RemotePlayer_{playerId} 上的 NetPlayerController"); }
-
             // 禁用物理碰撞体，防止玩家之间产生碰撞"吸附"
             DisablePhysicsComponents(go);
 
             // 禁用远程玩家的摄像机（只保留本地玩家的摄像机）
             DisableAllCameras(go);
-
-            var controller = go.GetComponent<RemotePlayerController>();
-            if (controller == null)
-            {
-                Debug.LogError($"[BattleManager] ❌ 预制体缺少 RemotePlayerController！请在 Player 预制体上添加 RemotePlayerController。");
-                controller = go.AddComponent<RemotePlayerController>();
-            }
 
             // 确保 BodyPartHitbox 存在
             if (go.GetComponent<BodyPartHitbox>() == null)
@@ -757,24 +808,36 @@ public class BattleManager : MonoBehaviour
                 Debug.Log($"[BattleManager] 为远程玩家 {playerId} 添加 BodyPartHitbox");
             }
 
-            controller.Initialize(playerId, teamId, position, heroConfig);
-
-            // 远程玩家：确保 Animancer + PistolAnimationDriver（从 AnimSet 读动画）
+            // 远程玩家：确保 Animancer + PlayerAnimationView（从 AnimSet 读动画，表现层薄壳）
             var remoteAnim = go.GetComponentInChildren<Animator>(true);
             if (remoteAnim != null)
             {
                 remoteAnim.runtimeAnimatorController = null; // 先清空 Controller，防止默认状态闪现
                 remoteAnim.applyRootMotion = false;
-                remoteAnim.enabled = true; // PistolGirlStateMachine.Awake 关掉了，必须重新打开
+                remoteAnim.enabled = true;
                 var remoteAnimancer = go.GetComponent<Animancer.AnimancerComponent>();
                 if (remoteAnimancer == null)
                     remoteAnimancer = go.AddComponent<Animancer.AnimancerComponent>();
                 remoteAnimancer.Animator = remoteAnim;
-                if (go.GetComponent<PistolAnimationDriver>() == null)
-                    go.AddComponent<PistolAnimationDriver>();
+                var animView = go.GetComponent<PlayerAnimationView>();
+                if (animView == null)
+                    animView = go.AddComponent<PlayerAnimationView>();
+                animView.animSet = Resources.Load<PlayerAnimationSet>("PistolGirl_AnimSet");
             }
 
+            // 注册到 ECS 世界（远程玩家实体 + 表现组件）
+            var world = FindFirstObjectByType<ClientECSWorld>();
+            if (world == null)
+            {
+                var wgo = new GameObject("ClientECSWorld");
+                world = wgo.AddComponent<ClientECSWorld>();
+            }
+            world.RegisterRemotePlayer(playerId, position.ToShared(), heroConfig, go);
 
+            // 表现薄壳：初始化静态字典（NetworkDebugOverlay 遍历用）
+            var remoteCtrl = go.GetComponent<RemotePlayerController>();
+            if (remoteCtrl != null)
+                remoteCtrl.Initialize(playerId, teamId, position, heroConfig);
 
             // TODO: 远程玩家外观需要从网络同步（对方的 outfitIndex / gunColor）
             // 当前远程玩家使用默认外观
@@ -798,8 +861,12 @@ public class BattleManager : MonoBehaviour
         var go = new GameObject($"RemotePlayer_{playerId}");
         go.transform.position = position;
 
-        // 添加 RemotePlayerController
-        var controller = go.AddComponent<RemotePlayerController>();
+        // 表现层薄壳
+        var animView = go.AddComponent<PlayerAnimationView>();
+        animView.animSet = Resources.Load<PlayerAnimationSet>("PistolGirl_AnimSet");
+
+        // 表现薄壳（静态字典注册）
+        go.AddComponent<RemotePlayerController>();
 
         // 基础胶囊体可视化
         var capsule = GameObject.CreatePrimitive(PrimitiveType.Capsule);
@@ -817,12 +884,17 @@ public class BattleManager : MonoBehaviour
             renderer.material.color = teamColor;
         }
 
-        // 初始化
-        controller.Initialize(playerId, teamId, position, heroConfig);
+        // 注册到 ECS 世界
+        var world = FindFirstObjectByType<ClientECSWorld>();
+        if (world == null)
+        {
+            var wgo = new GameObject("ClientECSWorld");
+            world = wgo.AddComponent<ClientECSWorld>();
+        }
+        world.RegisterRemotePlayer(playerId, position.ToShared(), heroConfig, go);
 
         return go;
     }
-
     private Vector3 GetSpawnPosition(int playerId, int teamId)
     {
         var world = CollisionWorldLoader.Instance;
@@ -921,17 +993,28 @@ public class BattleManager : MonoBehaviour
         _remotePlayers.Clear();
 
         // 清理网络状态
-        if (AttackManager.Instance != null)
-            AttackManager.Instance.Clear();
+        if (ClientECSWorld.Instance != null)
+        {
+            var world = ClientECSWorld.Instance;
+            var entity = world.GetLocalPlayerEntity();
+            if (world.EntityManager.IsValid(entity))
+                ClientAttackSystem.Clear(world.EntityManager, entity);
+            world.ClearAll();
+        }
 
-        if (HitEventManager.Instance != null)
-            HitEventManager.Instance.Clear();
+        ClientHitEventSystem.Clear();
 
-        if (VisualBulletManager.Instance != null)
-            VisualBulletManager.Instance.ClearAll();
+        if (ClientBulletSystem.Instance != null)
+            ClientBulletSystem.Instance.ClearAll();
 
         if (AuthoritySync.Instance != null)
             AuthoritySync.Instance.Reset();
+
+        // 销毁 BattleUI（DontDestroyOnLoad，会覆盖大厅UI阻挡点击）
+        if (BattleUI.Instance != null)
+        {
+            Destroy(BattleUI.Instance.gameObject);
+        }
 
         // 断开战斗连接
         if (BattleClient.Instance != null)
@@ -945,6 +1028,7 @@ public class BattleManager : MonoBehaviour
             LobbyClient.Instance.IsMatchFound = false;
             LobbyClient.Instance.MatchedBattleInfo = null;
             LobbyClient.Instance.IsInQueue = false;
+            LobbyClient.Instance.HeroConfirmed = false;
         }
 
         _battleInfo = null;
