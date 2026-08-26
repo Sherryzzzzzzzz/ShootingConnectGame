@@ -110,7 +110,10 @@ public class BattleUI : MonoBehaviour
         {
             var existingCanvas = GetComponentInChildren<Canvas>(includeInactive: true);
             if (existingCanvas != null)
+            {
                 ReferenceHudLayout.Ensure(existingCanvas.transform);
+                ArcadeHudVisuals.Ensure(existingCanvas.transform);
+            }
         }
 
         // 初始化 UI 状态
@@ -783,6 +786,7 @@ public class BattleUI : MonoBehaviour
         scaler.matchWidthOrHeight = 0.5f;
         canvasGo.AddComponent<GraphicRaycaster>();
         var layout = ReferenceHudLayout.Ensure(canvasGo.transform);
+        ArcadeHudVisuals.Ensure(canvasGo.transform);
 
         // EventSystem：战斗内不需要 UI 交互（Tab 记分板也不走 EventSystem），
         // EventSystem+InputModule 会吞键盘鼠标事件导致游戏输入失效——直接禁用

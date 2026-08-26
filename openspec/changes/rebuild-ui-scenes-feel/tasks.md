@@ -15,7 +15,7 @@
 ## 3. Hero select and scene presentation
 
 - [ ] 3.1 Stabilize HeroSelect camera targets, background anchors, and character preview composition.
-- [ ] 3.2 Selectively migrate compatible reference sprites/materials or recreate them with current URP/TMP components.
+- [x] 3.2 Selectively migrate compatible reference sprites/materials or recreate them with current URP/TMP components.
 - [ ] 3.3 Verify scene load transitions and editor responsiveness.
 
 ## 4. Gameplay feel
