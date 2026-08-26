@@ -37,6 +37,7 @@ namespace ShootingGame.Shared.Simulation
         public const float HitscanRange = 200f;
         public const float RespawnDelay = 3f;
         public const int DeathmatchLives = 3;
+        public const float MatchDurationSeconds = 300f;
 
         // 身体部位伤害倍率
         public const float HeadDamageMultiplier = 2.0f;

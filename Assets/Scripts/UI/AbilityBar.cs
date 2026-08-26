@@ -39,6 +39,7 @@ public class AbilityBar : MonoBehaviour
     private readonly Dictionary<byte, Sprite> _iconCache = new Dictionary<byte, Sprite>();
     private TMP_FontAsset _font;
     private float _lastUpdateTime;
+    private bool _slotsInitialized;
 
     public static AbilityBar Instance { get; private set; }
 
@@ -55,16 +56,15 @@ public class AbilityBar : MonoBehaviour
     private void Start()
     {
         _font = TMP_Settings.defaultFontAsset;
-        for (int i = 0; i < _slots.Length; i++)
-        {
-            var slot = _slots[i];
-            CreateSlotUI(ref slot, (i + 1).ToString(), i);
-            _slots[i] = slot;
-        }
+        _slotsInitialized = CacheSlotsFromHierarchy();
+        if (!_slotsInitialized)
+            Debug.LogError("[AbilityBar] Ability slots are missing. Generate the Fight HUD in the Unity editor.");
     }
 
     private void Update()
     {
+        if (!_slotsInitialized)
+            return;
         _lastUpdateTime += Time.deltaTime;
         if (_lastUpdateTime < 0.1f) return;
         _lastUpdateTime = 0f;
@@ -73,20 +73,83 @@ public class AbilityBar : MonoBehaviour
             RefreshSlot(_slots[i], i);
     }
 
+    /// <summary>Creates the four fixed ability slots while editing the scene.</summary>
+    public void GenerateInEditor()
+    {
+        _font = TMP_Settings.defaultFontAsset;
+        for (int i = 0; i < _slots.Length; i++)
+        {
+            var slotRoot = FindDeep(transform, $"AbilitySlot_{i + 1}");
+            var slot = _slots[i];
+            if (slotRoot == null)
+                CreateSlotUI(ref slot, (i + 1).ToString(), i);
+            _slots[i] = slot;
+        }
+        _slotsInitialized = CacheSlotsFromHierarchy();
+    }
+
+    private bool CacheSlotsFromHierarchy()
+    {
+        for (int i = 0; i < _slots.Length; i++)
+        {
+            var root = FindDeep(transform, $"AbilitySlot_{i + 1}");
+            if (root == null)
+                return false;
+
+            var slot = new SlotUI
+            {
+                Root = root.gameObject,
+                Background = FindImage(root, "Background"),
+                IconPlaceholder = FindImage(root, "Icon"),
+                CooldownOverlay = FindImage(root, "CooldownOverlay"),
+                CooldownText = FindText(root, "CooldownText"),
+                KeyText = FindText(root, "Description/KeyText"),
+                NameText = FindText(root, "Description/NameText"),
+                ActiveOverlay = FindImage(root, "ActiveOverlay"),
+                DurationBar = FindImage(root, "DurationBar")
+            };
+            if (slot.Background == null || slot.IconPlaceholder == null || slot.CooldownOverlay == null
+                || slot.CooldownText == null || slot.KeyText == null || slot.NameText == null
+                || slot.ActiveOverlay == null || slot.DurationBar == null)
+                return false;
+            _slots[i] = slot;
+        }
+        return true;
+    }
+
+    private static Transform FindDeep(Transform root, string path)
+    {
+        var direct = root.Find(path);
+        if (direct != null)
+            return direct;
+        for (int i = 0; i < root.childCount; i++)
+        {
+            var found = FindDeep(root.GetChild(i), path);
+            if (found != null)
+                return found;
+        }
+        return null;
+    }
+
+    private static Image FindImage(Transform root, string path)
+    {
+        var child = root.Find(path);
+        return child != null ? child.GetComponent<Image>() : null;
+    }
+
+    private static TMP_Text FindText(Transform root, string path)
+    {
+        var child = root.Find(path);
+        return child != null ? child.GetComponent<TMP_Text>() : null;
+    }
+
     private void CreateSlotUI(ref SlotUI slot, string keyName, int slotIndex)
     {
         var canvas = GetComponentInChildren<Canvas>();
         if (canvas == null)
         {
-            var canvasGo = new GameObject("AbilityBarCanvas");
-            canvasGo.transform.SetParent(transform, false);
-            canvas = canvasGo.AddComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            var scaler = canvasGo.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1920, 1080);
-            scaler.matchWidthOrHeight = 0.5f;
-            canvasGo.AddComponent<GraphicRaycaster>();
+            Debug.LogError("[AbilityBar] Cannot create ability slots without a pre-generated HUD canvas.");
+            return;
         }
 
         var parent = canvas.transform;

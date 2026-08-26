@@ -216,6 +216,7 @@ namespace ShootingGame.Network.Server
             _pendingAbilityConfirmations.Clear();
             PendingAttacks.Clear();
             _gameOverSent = false;
+            _battleStartTick = -1;
             _currentTick = 1;
             _accumulator = 0f;
             Debug.Log($"[HostBattleServer] Reset match state for BattleId={_battleId}");
@@ -402,6 +403,7 @@ namespace ShootingGame.Network.Server
         }
 
         private bool _gameOverSent;
+        private int _battleStartTick = -1;
         private int _expectedPlayerCount = 0; // 匹配完成后由 LocalServerStarter 设置
 
         public void SetExpectedPlayerCount(int count) { _expectedPlayerCount = count; }
@@ -418,6 +420,11 @@ namespace ShootingGame.Network.Server
             foreach (var (_, s) in _players) { if (s.IsReady) readyCount++; }
             if (readyCount < _expectedPlayerCount || readyCount < 2) return;
 
+            if (_battleStartTick < 0)
+                _battleStartTick = _currentTick;
+
+            bool timedOut = (_currentTick - _battleStartTick) * _tickInterval >= GameConstants.MatchDurationSeconds;
+
             int survivorCount = 0;
             int lastSurvivorId = -1;
             foreach (var (pid, slot) in _players)
@@ -429,10 +436,30 @@ namespace ShootingGame.Network.Server
                 }
             }
 
-            if (survivorCount <= 1)
+            if (!timedOut && survivorCount > 1)
+                return;
+
+            if (timedOut)
+            {
+                int bestKills = int.MinValue;
+                lastSurvivorId = -1;
+                foreach (var (pid, slot) in _players)
+                {
+                    if (!slot.IsReady) continue;
+                    bool better = slot.Kills > bestKills
+                        || (slot.Kills == bestKills && (lastSurvivorId < 0 || pid < lastSurvivorId));
+                    if (better)
+                    {
+                        bestKills = slot.Kills;
+                        lastSurvivorId = pid;
+                    }
+                }
+            }
+
+            if (timedOut || survivorCount <= 1)
             {
                 _gameOverSent = true;
-                Debug.Log($"[HostBattleServer] Game Over! Winner: player {lastSurvivorId}");
+                Debug.Log($"[HostBattleServer] Game Over! reason={(timedOut ? "time-limit" : "last-survivor")}, winner: player {lastSurvivorId}");
                 var gameOver = new MainPack
                 {
                     RequestCode = RequestCode.Battle,

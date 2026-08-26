@@ -20,6 +20,7 @@ Rebuild the current UI and scene presentation using the reference project's layo
 - Fight HUD has explicit upper/lower layers for score, stage/time, health, ammo, abilities, crosshair, hit feedback, and network status.
 - Hero select has a stable camera/UI composition and does not rebuild the same hierarchy every frame.
 - Ammo, score, cooldown, hit, and ability activation feedback update from authoritative/predicted events with bounded refresh work.
+- Fight HUD objects are generated in the editor and persisted in the scene; runtime does not rebuild the hierarchy. Matches auto-settle at 300 seconds, and the fixed ammo strip animates the rightmost shell ejecting with left shells filling the slot.
 - Movement and ADS transitions use deterministic shared parameters; camera recoil/FOV remains presentation-only and smooth.
 - Reference-derived assets are selectively imported or recreated with current shaders/TMP bindings, with no missing scripts or pink materials.
 - A Unity editor/play-mode verification record and focused server regression tests are included.

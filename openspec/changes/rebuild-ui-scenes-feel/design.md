@@ -12,6 +12,8 @@ Use `Game00.unity` as a layout reference only. Recreate the following logical la
 
 Existing `BattleUI` and `AbilityBar` remain the data owners. New presentation components should subscribe to `ClientPresentationEventBus`, `HitEventView`, and the latest ECS snapshot rather than polling every frame. Refresh intervals and object counts are bounded; repeated entries use pooling or reuse.
 
+The Fight HUD hierarchy is generated and saved by the Unity editor menu `ShootingGame/UI/Generate Arcade Fight HUD`. Runtime startup must only bind and update serialized objects; it must not create HUD canvases, text, images, or ability slots. The match clock is authoritative on the host and is capped at 300 seconds. When the cap expires, the host sends the existing game-over packet and resolves the winner by kills with deterministic player-id tie breaking. Ammo presentation uses a fixed shell object pool: the rightmost visible shell is ejected on fire while the shells to its left slide into the open slot.
+
 ## Scene composition
 
 Keep `Fight.unity` as the network gameplay scene and `HeroSelectScene.unity` as the selection scene. Add only scene-local anchors, canvases, camera targets, and presentation components. Use current TMP, URP materials, and Cinemachine targets. Any reference sprite or animation is copied only after dependency and license checks, then rebound through current components.

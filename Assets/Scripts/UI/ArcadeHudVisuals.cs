@@ -2,10 +2,11 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 using ShootingGame.Shared.ECS;
+using ShootingGame.Shared.Simulation;
 
 /// <summary>
-/// Runtime-only arcade HUD skin matching the reference game's slanted frame layout.
-/// Existing BattleUI controls remain active underneath this presentation layer.
+/// Scene-persisted arcade HUD skin matching the reference game's slanted frame layout.
+/// The hierarchy is generated in the editor; runtime only updates its data.
 /// </summary>
 public sealed class ArcadeHudVisuals : MonoBehaviour
 {
@@ -16,21 +17,40 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
     private TMP_Text _score;
     private TMP_Text _timer;
     private TMP_Text _ammo;
-    private Image[] _shells;
+    private Image[] _shells = new Image[4];
     private float _displayedScore;
-    private float _remainingSeconds = 13f;
+    private float _remainingSeconds = GameConstants.MatchDurationSeconds;
     private bool _built;
+    private int _lastAmmo = -1;
+    private BattleManager.BattleState _lastState;
+    private readonly Vector2[] _shellBasePositions = new Vector2[4];
+    private readonly RectTransform[] _shellRects = new RectTransform[4];
+    private readonly Vector2[] _shellStartPositions = new Vector2[4];
+    private readonly Vector2[] _shellTargets = new Vector2[4];
+    private readonly int[] _activeShellIndices = new int[4];
+    private float _shellShotProgress;
+    private int _ejectIndex = -1;
+    private int _shotVisibleCount;
+    private int _pendingShots;
+    private bool _shellShotAnimating;
 
-    public static ArcadeHudVisuals Ensure(Transform canvas)
+    /// <summary>Called by the Unity editor generator; never called from runtime startup.</summary>
+    public void GenerateInEditor()
     {
-        if (canvas == null)
-            return null;
+        Build();
+    }
 
-        var visuals = canvas.GetComponent<ArcadeHudVisuals>();
-        if (visuals == null)
-            visuals = canvas.gameObject.AddComponent<ArcadeHudVisuals>();
-        visuals.Build();
-        return visuals;
+    private void OnEnable()
+    {
+        _remainingSeconds = GameConstants.MatchDurationSeconds;
+        _lastAmmo = -1;
+        _lastState = BattleManager.BattleState.None;
+        var existingRoot = transform.Find(RootName);
+        if (existingRoot != null)
+        {
+            CacheReferences(existingRoot);
+            _built = _score != null;
+        }
     }
 
     private void Build()
@@ -39,7 +59,18 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
             return;
         _built = true;
 
-        var root = new GameObject(RootName, typeof(RectTransform));
+        var existingRoot = transform.Find(RootName);
+        if (existingRoot != null)
+        {
+            CacheReferences(existingRoot);
+            if (_score != null)
+            {
+                StyleExistingText();
+                return;
+            }
+        }
+
+        var root = existingRoot != null ? existingRoot.gameObject : new GameObject(RootName, typeof(RectTransform));
         root.transform.SetParent(transform, false);
         var rootRect = root.GetComponent<RectTransform>();
         rootRect.anchorMin = Vector2.zero;
@@ -93,9 +124,34 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
                 shell.color = new Color(1f, 0.86f, 0.42f, 0.98f);
             }
             _shells[i] = shell;
+            if (shell != null)
+            {
+                _shellRects[i] = shell.rectTransform;
+                _shellBasePositions[i] = shell.rectTransform.anchoredPosition;
+            }
         }
 
         StyleExistingText();
+    }
+
+    private void CacheReferences(Transform root)
+    {
+        _score = FindText(root, "ScoreNum");
+        _timer = FindText(root, "TimeNum");
+        _ammo = FindText(root, "AmmoNum");
+        for (int i = 0; i < _shells.Length; i++)
+        {
+            var shell = root.Find($"AmmoShell{i + 1}");
+            _shells[i] = shell != null ? shell.GetComponent<Image>() : null;
+            _shellRects[i] = shell != null ? shell.GetComponent<RectTransform>() : null;
+            _shellBasePositions[i] = _shellRects[i] != null ? _shellRects[i].anchoredPosition : Vector2.zero;
+        }
+    }
+
+    private static TMP_Text FindText(Transform root, string name)
+    {
+        var child = root.Find(name);
+        return child != null ? child.GetComponent<TMP_Text>() : null;
     }
 
     private void Update()
@@ -106,6 +162,7 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
         UpdateScore();
         UpdateTimer();
         UpdateAmmo();
+        UpdateShellAnimations();
     }
 
     private void UpdateScore()
@@ -132,9 +189,13 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
 
     private void UpdateTimer()
     {
-        if (BattleManager.Instance != null && BattleManager.Instance.State == BattleManager.BattleState.Playing)
+        var state = BattleManager.Instance != null ? BattleManager.Instance.State : BattleManager.BattleState.None;
+        if (state == BattleManager.BattleState.Playing && _lastState != BattleManager.BattleState.Playing)
+            _remainingSeconds = GameConstants.MatchDurationSeconds;
+        _lastState = state;
+        if (state == BattleManager.BattleState.Playing)
             _remainingSeconds = Mathf.Max(0f, _remainingSeconds - Time.deltaTime);
-        _timer?.SetText("{0:00}.{1:00}", Mathf.FloorToInt(_remainingSeconds), Mathf.FloorToInt((_remainingSeconds % 1f) * 100f));
+        _timer?.SetText("{0:000}.{1:00}", Mathf.FloorToInt(_remainingSeconds), Mathf.FloorToInt((_remainingSeconds % 1f) * 100f));
         if (_timer != null && _remainingSeconds <= 3f)
             _timer.color = Color.Lerp(new Color(1f, 0.94f, 0.2f), Color.red, Mathf.PingPong(Time.unscaledTime * 3f, 1f));
     }
@@ -152,12 +213,155 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
             }
         }
 
+        if (_lastAmmo < 0)
+            ResetShellLayout(current);
+        else if (current < _lastAmmo)
+        {
+            if (_shellShotAnimating)
+                _pendingShots++;
+            else
+                StartShellShot(current);
+        }
+        else if (current > _lastAmmo)
+            ResetShellLayout(current);
+        _lastAmmo = current;
         _ammo?.SetText("{0}", current);
-        if (_shells == null)
+    }
+
+    private void UpdateShellAnimations()
+    {
+        if (!_shellShotAnimating)
             return;
+
+        _shellShotProgress += Time.deltaTime / 0.24f;
+        float t = Mathf.Clamp01(_shellShotProgress);
         for (int i = 0; i < _shells.Length; i++)
-            if (_shells[i] != null)
-                _shells[i].gameObject.SetActive(i < Mathf.Min(current, _shells.Length));
+        {
+            if (_shells[i] == null || !_shells[i].gameObject.activeSelf)
+                continue;
+
+            if (_shellRects[i] != null)
+            {
+                if (i == _ejectIndex)
+                {
+                    _shellRects[i].anchoredPosition = _shellStartPositions[i] + new Vector2(72f * t, 66f * t);
+                    _shellRects[i].localRotation = Quaternion.Euler(0f, 0f, -70f * t);
+                }
+                else
+                {
+                    _shellRects[i].anchoredPosition = Vector2.Lerp(_shellStartPositions[i], _shellTargets[i], t);
+                }
+            }
+            if (i == _ejectIndex)
+            {
+                var color = _shells[i].color;
+                color.a = 1f - t;
+                _shells[i].color = color;
+            }
+        }
+
+        if (t < 1f)
+            return;
+
+        for (int i = 0; i < _shells.Length; i++)
+        {
+            if (_shells[i] == null || i == _ejectIndex)
+                continue;
+            if (_shellRects[i] != null)
+            {
+                _shellRects[i].anchoredPosition = _shellTargets[i];
+                _shellRects[i].localRotation = Quaternion.identity;
+            }
+        }
+
+        if (_shells[_ejectIndex] != null)
+        {
+            var color = _shells[_ejectIndex].color;
+            color.a = 0.98f;
+            _shells[_ejectIndex].color = color;
+            if (_shotVisibleCount >= _shells.Length)
+            {
+                _shells[_ejectIndex].gameObject.SetActive(true);
+                if (_shellRects[_ejectIndex] != null)
+                    _shellRects[_ejectIndex].anchoredPosition = _shellBasePositions[0];
+            }
+            else
+            {
+                _shells[_ejectIndex].gameObject.SetActive(false);
+            }
+        }
+        _shellShotAnimating = false;
+        _ejectIndex = -1;
+        if (_pendingShots > 0)
+        {
+            _pendingShots--;
+            StartShellShot(_lastAmmo);
+        }
+    }
+
+    private void ResetShellLayout(int currentAmmo)
+    {
+        int visible = Mathf.Clamp(Mathf.Min(currentAmmo, _shells.Length), 0, _shells.Length);
+        int start = _shells.Length - visible;
+        _shellShotAnimating = false;
+        _ejectIndex = -1;
+        _pendingShots = 0;
+        for (int i = 0; i < _shells.Length; i++)
+        {
+            if (_shells[i] == null)
+                continue;
+            if (_shellRects[i] != null)
+            {
+                _shellRects[i].anchoredPosition = _shellBasePositions[i];
+                _shellRects[i].localRotation = Quaternion.identity;
+            }
+            var color = _shells[i].color;
+            color.a = 0.98f;
+            _shells[i].color = color;
+            _shells[i].gameObject.SetActive(i >= start);
+        }
+    }
+
+    private void StartShellShot(int currentAmmo)
+    {
+        if (_shellShotAnimating)
+            return;
+
+        int activeCount = 0;
+        for (int i = 0; i < _shells.Length; i++)
+            if (_shells[i] != null && _shells[i].gameObject.activeSelf)
+                _activeShellIndices[activeCount++] = i;
+        if (activeCount == 0)
+            return;
+
+        for (int i = 1; i < activeCount; i++)
+        {
+            int value = _activeShellIndices[i];
+            int j = i - 1;
+            while (j >= 0 && _shellRects[_activeShellIndices[j]].anchoredPosition.x > _shellRects[value].anchoredPosition.x)
+            {
+                _activeShellIndices[j + 1] = _activeShellIndices[j--];
+            }
+            _activeShellIndices[j + 1] = value;
+        }
+
+        _ejectIndex = _activeShellIndices[activeCount - 1];
+        _shotVisibleCount = Mathf.Clamp(Mathf.Min(currentAmmo, _shells.Length), 0, _shells.Length);
+        int survivorCount = activeCount - 1;
+        int targetStart = _shells.Length - Mathf.Min(_shotVisibleCount, survivorCount);
+        int survivor = 0;
+        for (int i = 0; i < activeCount; i++)
+        {
+            int shellIndex = _activeShellIndices[i];
+            if (_shellRects[shellIndex] != null)
+                _shellStartPositions[shellIndex] = _shellRects[shellIndex].anchoredPosition;
+            if (shellIndex == _ejectIndex)
+                continue;
+            int targetSlot = Mathf.Clamp(targetStart + survivor++, 0, _shells.Length - 1);
+            _shellTargets[shellIndex] = _shellBasePositions[targetSlot];
+        }
+        _shellShotProgress = 0f;
+        _shellShotAnimating = true;
     }
 
     private static RectTransform CreateBand(Transform parent, string name, bool topBand, Vector2 min, Vector2 max, Vector2 pivot, Vector2 size)

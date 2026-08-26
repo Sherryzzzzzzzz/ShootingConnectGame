@@ -88,7 +88,6 @@ public class SceneBootstrapper : MonoBehaviour
         EnsureManager<ClientECSWorld>("ClientECSWorld");
         EnsureManager<UnityEcsDriver>("UnityEcsDriver");
         EnsureManager<ClientBulletSystem>("ClientBulletSystem");
-        EnsureManager<BattleUI>("BattleUI");
         EnsureManager<HitEventView>("HitEventView");
         EnsureManager<ClientHitUiConsumer>("ClientHitUiConsumer");
         EnsureManager<ClientHitVfxConsumer>("ClientHitVfxConsumer");

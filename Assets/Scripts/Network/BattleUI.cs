@@ -103,18 +103,9 @@ public class BattleUI : MonoBehaviour
 
     private void Start()
     {
-        // 如果未通过预制体赋值，自动创建 UI
+        // HUD 必须由编辑器预先生成，运行时不再创建层级。
         if (healthBar == null)
-            CreateDefaultUI();
-        else
-        {
-            var existingCanvas = GetComponentInChildren<Canvas>(includeInactive: true);
-            if (existingCanvas != null)
-            {
-                ReferenceHudLayout.Ensure(existingCanvas.transform);
-                ArcadeHudVisuals.Ensure(existingCanvas.transform);
-            }
-        }
+            Debug.LogError("[BattleUI] HUD is missing. Run ShootingGame/UI/Generate Arcade Fight HUD in the editor.");
 
         // 初始化 UI 状态
         if (gameOverPanel != null) gameOverPanel.SetActive(false);
@@ -786,7 +777,6 @@ public class BattleUI : MonoBehaviour
         scaler.matchWidthOrHeight = 0.5f;
         canvasGo.AddComponent<GraphicRaycaster>();
         var layout = ReferenceHudLayout.Ensure(canvasGo.transform);
-        ArcadeHudVisuals.Ensure(canvasGo.transform);
 
         // EventSystem：战斗内不需要 UI 交互（Tab 记分板也不走 EventSystem），
         // EventSystem+InputModule 会吞键盘鼠标事件导致游戏输入失效——直接禁用
@@ -855,6 +845,13 @@ public class BattleUI : MonoBehaviour
         }
 
         Debug.Log("[BattleUI] 默认 UI 创建完成");
+    }
+
+    /// <summary>Editor menu entry point; runtime startup never creates HUD objects.</summary>
+    public void GenerateDefaultUIInEditor()
+    {
+        if (healthBar == null)
+            CreateDefaultUI();
     }
 
     private TMP_Text CreateTMPText(Transform parent, string name, string text, TMP_FontAsset font, float fontSize, Color? color = null, TextAlignmentOptions alignment = TextAlignmentOptions.Center)

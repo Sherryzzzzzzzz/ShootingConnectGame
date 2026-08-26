@@ -34,6 +34,7 @@ namespace ShootingGame.Shared.Simulation
         public const float HitscanRange = 200f;
         public const float RespawnDelay = 3f; // seconds before respawn
         public const int DeathmatchLives = 3;
+        public const float MatchDurationSeconds = 300f;
 
         // Body part damage multipliers
         public const float HeadDamageMultiplier = 2.0f;

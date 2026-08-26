@@ -11,6 +11,9 @@
 - [x] 2.1 Create explicit upper/lower HUD anchors and transition overlay in `Fight.unity` or a reusable prefab.
 - [ ] 2.2 Rework ammo, score/time, health, ability, compass, and contextual hint presentation around authoritative/predicted events.
 - [ ] 2.3 Add hit/kill/ability feedback animations without per-frame GameObject creation.
+- [x] 2.4 Generate and persist the arcade HUD and fixed ability slots in the Unity editor; remove runtime hierarchy creation.
+- [x] 2.5 Add the authoritative 300-second match timeout and deterministic time-limit settlement.
+- [x] 2.6 Add fixed-pool ammo shell ejection/fill presentation for firing feedback.
 
 ## 3. Hero select and scene presentation
 
