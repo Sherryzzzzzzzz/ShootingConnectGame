@@ -28,4 +28,4 @@
 
 - [ ] 5.1 Run focused and full server tests; add regression coverage for new shared parameters.
 - [ ] 5.2 Compile and play-test Fight/HeroSelect in Unity; capture console/screenshot evidence.
-- [ ] 5.3 Commit the scoped change on a non-main branch and report the exact push target before uploading.
+- [x] 5.3 Commit the scoped change on a non-main branch and report the exact push target before uploading.
