@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
@@ -5,7 +6,7 @@ using ShootingGame.Shared.Ability;
 using ShootingGame.Shared.ECS;
 
 /// <summary>
-/// 技能栏 UI：显示 Q/E 两个英雄技能槽的冷却、持续时间和激活状态。
+/// 技能栏 UI：显示数字键 1-4 的职业技能冷却、持续时间和激活状态。
 /// 从 ClientECSWorld 本地玩家实体读取 AbilityInstanceComponent 数据。
 /// </summary>
 public class AbilityBar : MonoBehaviour
@@ -34,8 +35,8 @@ public class AbilityBar : MonoBehaviour
         public Image DurationBar;
     }
 
-    private SlotUI _slotQ;
-    private SlotUI _slotE;
+    private readonly SlotUI[] _slots = new SlotUI[4];
+    private readonly Dictionary<byte, Sprite> _iconCache = new Dictionary<byte, Sprite>();
     private TMP_FontAsset _font;
     private float _lastUpdateTime;
 
@@ -54,8 +55,12 @@ public class AbilityBar : MonoBehaviour
     private void Start()
     {
         _font = TMP_Settings.defaultFontAsset;
-        CreateSlotUI(ref _slotQ, "Q");
-        CreateSlotUI(ref _slotE, "E");
+        for (int i = 0; i < _slots.Length; i++)
+        {
+            var slot = _slots[i];
+            CreateSlotUI(ref slot, (i + 1).ToString(), i);
+            _slots[i] = slot;
+        }
     }
 
     private void Update()
@@ -64,11 +69,11 @@ public class AbilityBar : MonoBehaviour
         if (_lastUpdateTime < 0.1f) return;
         _lastUpdateTime = 0f;
 
-        RefreshSlot(_slotQ, 2); // Q → Abilities[2]
-        RefreshSlot(_slotE, 3); // E → Abilities[3]
+        for (int i = 0; i < _slots.Length; i++)
+            RefreshSlot(_slots[i], i);
     }
 
-    private void CreateSlotUI(ref SlotUI slot, string keyName)
+    private void CreateSlotUI(ref SlotUI slot, string keyName, int slotIndex)
     {
         var canvas = GetComponentInChildren<Canvas>();
         if (canvas == null)
@@ -84,10 +89,14 @@ public class AbilityBar : MonoBehaviour
             canvasGo.AddComponent<GraphicRaycaster>();
         }
 
-        float xOffset = keyName == "Q" ? -(slotSize + slotSpacing) * 0.5f : (slotSize + slotSpacing) * 0.5f;
+        var parent = canvas.transform;
+        var lower = canvas.transform.Find("UILowerBase");
+        if (lower != null) parent = lower;
+
+        float xOffset = (slotIndex - 1.5f) * (slotSize + slotSpacing);
 
         slot.Root = new GameObject($"AbilitySlot_{keyName}");
-        slot.Root.transform.SetParent(canvas.transform, false);
+        slot.Root.transform.SetParent(parent, false);
         var rootRect = slot.Root.AddComponent<RectTransform>();
         rootRect.anchorMin = barAnchor;
         rootRect.anchorMax = barAnchor;
@@ -198,7 +207,7 @@ public class AbilityBar : MonoBehaviour
         slot.DurationBar.fillAmount = 0f;
     }
 
-    private void RefreshSlot(SlotUI slot, int abilityIndex)
+    private void RefreshSlot(SlotUI slot, int skillIndex)
     {
         var world = ClientECSWorld.Instance;
         if (world == null) return;
@@ -207,21 +216,36 @@ public class AbilityBar : MonoBehaviour
         if (!world.EntityManager.IsValid(entity)) return;
 
         var em = world.EntityManager;
-        if (!em.TryGetComponent<AbilityOwnerComponent>(entity, out var owner) || owner.GrantedAbilities == null)
+        var hero = world.GetHeroConfig(world.LocalPlayerId);
+        if (hero?.Abilities == null)
         {
             SetSlotInactive(slot);
             return;
         }
 
-        // HeroConfig.Abilities is a 4-element array: [Fire, Reload, QSkill, ESkill]
-        if (abilityIndex < 0 || abilityIndex >= owner.GrantedAbilities.Count)
+        AbilityConfig abilityCfg = null;
+        int foundSkills = 0;
+        foreach (var candidate in hero.Abilities)
+        {
+            if (candidate == null || candidate.AssetId < 10) continue;
+            if (foundSkills++ == skillIndex)
+            {
+                abilityCfg = candidate;
+                break;
+            }
+        }
+
+        if (abilityCfg == null)
         {
             SetSlotInactive(slot);
             return;
         }
 
-        var abilityCfg = owner.GrantedAbilities[abilityIndex];
+        slot.Root.SetActive(true);
         slot.NameText.text = abilityCfg.Name;
+        var icon = LoadAbilityIcon(abilityCfg.AssetId);
+        slot.IconPlaceholder.sprite = icon;
+        slot.IconPlaceholder.color = icon != null ? Color.white : new Color(0.22f, 0.22f, 0.22f, 1f);
 
         // 读取运行时状态
         float cooldownRemaining = 0f;
@@ -258,7 +282,7 @@ public class AbilityBar : MonoBehaviour
         // 冷却覆盖层
         if (isOnCooldown && maxCooldown > 0f)
         {
-            slot.CooldownOverlay.fillAmount = cooldownRemaining / maxCooldown;
+            slot.CooldownOverlay.fillAmount = Mathf.Clamp01(cooldownRemaining / maxCooldown);
             slot.CooldownText.text = cooldownRemaining > 1f
                 ? $"{cooldownRemaining:F0}"
                 : $"{cooldownRemaining:F1}";
@@ -289,14 +313,41 @@ public class AbilityBar : MonoBehaviour
             : normalSlotColor;
     }
 
+    private Sprite LoadAbilityIcon(byte assetId)
+    {
+        if (_iconCache.TryGetValue(assetId, out var cached))
+            return cached;
+
+        string resourcePath = $"AbilityIcons/Ability_{assetId}";
+        var icon = Resources.Load<Sprite>(resourcePath);
+        if (icon == null)
+        {
+            var texture = Resources.Load<Texture2D>(resourcePath);
+            if (texture != null)
+            {
+                icon = Sprite.Create(
+                    texture,
+                    new Rect(0f, 0f, texture.width, texture.height),
+                    new Vector2(0.5f, 0.5f),
+                    100f);
+                icon.name = $"Ability_{assetId}_RuntimeSprite";
+            }
+        }
+
+        _iconCache[assetId] = icon;
+        return icon;
+    }
+
     private void SetSlotInactive(SlotUI slot)
     {
-        slot.NameText.text = "";
+        slot.NameText.text = "--";
+        slot.IconPlaceholder.sprite = null;
+        slot.IconPlaceholder.color = new Color(0.1f, 0.1f, 0.1f, 0.45f);
         slot.CooldownOverlay.fillAmount = 0f;
         slot.CooldownText.text = "";
         slot.ActiveOverlay.color = Color.clear;
         slot.DurationBar.fillAmount = 0f;
-        slot.Background.color = normalSlotColor;
+        slot.Background.color = new Color(0.08f, 0.08f, 0.08f, 0.45f);
     }
 
     private TMP_Text CreateTMP(Transform parent, string name, string text, float fontSize, Color color)

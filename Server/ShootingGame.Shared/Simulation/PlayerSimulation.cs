@@ -15,9 +15,15 @@ namespace ShootingGame.Shared.Simulation
             if (moveMag < 0.001f) moveDir = Vec3.Zero;
 
             float targetSpeed = input.Run ? GameConstants.MoveSpeed * GameConstants.RunMultiplier : GameConstants.MoveSpeed;
-            float actualSpeed = moveMag * targetSpeed;
-
-            snap.Velocity = moveDir * targetSpeed;
+            if (input.Aim) targetSpeed *= GameConstants.AimMoveMultiplier;
+            Vec3 targetVelocity = moveDir * (moveMag * targetSpeed);
+            float acceleration = moveMag > 0.001f
+                ? GameConstants.MovementAcceleration
+                : GameConstants.MovementStopAcceleration;
+            snap.Velocity = snap.Velocity.SqrMagnitude < 0.0001f && moveMag > 0.001f
+                ? targetVelocity
+                : Vec3.Lerp(snap.Velocity, targetVelocity,
+                    GameMath.Clamp01(acceleration * dt));
 
             // 跳跃输入（不在跳跃帧上立即应用重力，避免削弱初始速度）
             if (input.Jump && snap.IsGrounded)
@@ -29,9 +35,9 @@ namespace ShootingGame.Shared.Simulation
 
             if (collisionWorld != null)
             {
-                float hx = moveDir.x * actualSpeed * dt;
+                float hx = snap.Velocity.x * dt;
                 float hy = snap.VerticalVelocity * dt;
-                float hz = moveDir.z * actualSpeed * dt;
+                float hz = snap.Velocity.z * dt;
                 Vec3 displacement = new Vec3(hx, hy, hz);
 
                 // 重力（在位移之后应用，为下一帧准备）
@@ -50,9 +56,9 @@ namespace ShootingGame.Shared.Simulation
             {
                 float groundY = 0.01f;
 
-                float newX = snap.Position.x + moveDir.x * actualSpeed * dt;
+                float newX = snap.Position.x + snap.Velocity.x * dt;
                 float newY = snap.Position.y + snap.VerticalVelocity * dt;
-                float newZ = snap.Position.z + moveDir.z * actualSpeed * dt;
+                float newZ = snap.Position.z + snap.Velocity.z * dt;
 
                 if (newY <= groundY)
                 {
@@ -69,8 +75,29 @@ namespace ShootingGame.Shared.Simulation
                     snap.VerticalVelocity += GameConstants.Gravity * dt;
             }
 
-            Quat targetRot = Quat.Euler(0f, input.AimYaw, 0f);
-            snap.Rotation = Quat.RotateTowards(snap.Rotation, targetRot, GameConstants.RotationSpeed * dt);
+            if (input.Tick > 0)
+            {
+                float targetYaw;
+                bool hasTargetYaw;
+                if (input.Aim)
+                {
+                    targetYaw = input.AimYaw;
+                    hasTargetYaw = true;
+                }
+                else
+                {
+                    hasTargetYaw = moveDir.SqrMagnitude > 0.0001f;
+                    targetYaw = hasTargetYaw
+                        ? GameMath.Atan2(moveDir.x, moveDir.z) * GameMath.Rad2Deg
+                        : 0f;
+                }
+
+                if (hasTargetYaw)
+                {
+                    Quat targetRot = Quat.Euler(0f, targetYaw, 0f);
+                    snap.Rotation = Quat.RotateTowards(snap.Rotation, targetRot, GameConstants.RotationSpeed * dt);
+                }
+            }
 
             if (snap.FireCooldown > 0f)
                 snap.FireCooldown -= dt;

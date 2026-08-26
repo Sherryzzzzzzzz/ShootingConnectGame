@@ -85,9 +85,17 @@ public class SceneBootstrapper : MonoBehaviour
 
         // 确保其他必要的管理器存在
         EnsureManager<DynamicTickSystem>("DynamicTickSystem");
+        EnsureManager<ClientECSWorld>("ClientECSWorld");
+        EnsureManager<UnityEcsDriver>("UnityEcsDriver");
         EnsureManager<ClientBulletSystem>("ClientBulletSystem");
+        EnsureManager<BattleUI>("BattleUI");
         EnsureManager<HitEventView>("HitEventView");
-        EnsureManager<AuthoritySync>("AuthoritySync");
+        EnsureManager<ClientHitUiConsumer>("ClientHitUiConsumer");
+        EnsureManager<ClientHitVfxConsumer>("ClientHitVfxConsumer");
+        EnsureManager<ClientHitAudioConsumer>("ClientHitAudioConsumer");
+        EnsureManager<ClientHitCameraConsumer>("ClientHitCameraConsumer");
+        EnsureManager<ClientHitAnimationConsumer>("ClientHitAnimationConsumer");
+        EnsureManager<ClientAbilityPresentationConsumer>("ClientAbilityPresentationConsumer");
         EnsureManager<ProceduralEffectManager>("ProceduralEffectManager");
 
         // 确保卡通后处理 Global Volume 存在

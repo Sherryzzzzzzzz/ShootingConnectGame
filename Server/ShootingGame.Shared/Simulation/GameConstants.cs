@@ -8,7 +8,10 @@ namespace ShootingGame.Shared.Simulation
         // Movement
         public const float MoveSpeed = 6f;
         public const float RunMultiplier = 1.5f;
-        public const float RotationSpeed = 720f;
+        public const float MovementAcceleration = 12f;
+        public const float MovementStopAcceleration = 16f;
+        public const float AimMoveMultiplier = 0.38f;
+        public const float RotationSpeed = 360f;
 
         // Physics
         public const float Gravity = -20f;
@@ -30,6 +33,7 @@ namespace ShootingGame.Shared.Simulation
         public const byte HitscanDamage = 25;
         public const float HitscanRange = 200f;
         public const float RespawnDelay = 3f; // seconds before respawn
+        public const int DeathmatchLives = 3;
 
         // Body part damage multipliers
         public const float HeadDamageMultiplier = 2.0f;

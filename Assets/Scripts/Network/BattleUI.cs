@@ -73,6 +73,17 @@ public class BattleUI : MonoBehaviour
     private int _kills;
     private int _deaths;
     private float _crosshairHitTimer;
+    private float _hudRefreshTimer;
+    private float _scoreboardRefreshTimer;
+    private int _lastCurrentAmmo = int.MinValue;
+    private int _lastMaxAmmo = int.MinValue;
+    private bool _lastReloading;
+    private bool _hasReloadState;
+    private int _lastPingMs = int.MinValue;
+    private int _lastPingTier = -1;
+    private float _lastCrosshairScale = -1f;
+    private const float HudRefreshInterval = 0.1f;
+    private const float ScoreboardRefreshInterval = 0.2f;
     private readonly Queue<GameObject> _killFeedItems = new Queue<GameObject>();
     private TMP_FontAsset _cjkFallbackFont;
 
@@ -95,6 +106,12 @@ public class BattleUI : MonoBehaviour
         // 如果未通过预制体赋值，自动创建 UI
         if (healthBar == null)
             CreateDefaultUI();
+        else
+        {
+            var existingCanvas = GetComponentInChildren<Canvas>(includeInactive: true);
+            if (existingCanvas != null)
+                ReferenceHudLayout.Ensure(existingCanvas.transform);
+        }
 
         // 初始化 UI 状态
         if (gameOverPanel != null) gameOverPanel.SetActive(false);
@@ -114,10 +131,7 @@ public class BattleUI : MonoBehaviour
             HitEventView.Instance.OnHitEvent += OnHitEvent;
         }
 
-        if (AuthoritySync.Instance != null)
-        {
-            AuthoritySync.Instance.OnPlayerHpChanged += OnHpChanged;
-        }
+        ClientPresentationEventBus.PlayerHealthChanged += OnHpChanged;
 
         // 按钮事件
         if (cancelMatchingButton != null)
@@ -148,10 +162,7 @@ public class BattleUI : MonoBehaviour
             HitEventView.Instance.OnHitEvent -= OnHitEvent;
         }
 
-        if (AuthoritySync.Instance != null)
-        {
-            AuthoritySync.Instance.OnPlayerHpChanged -= OnHpChanged;
-        }
+        ClientPresentationEventBus.PlayerHealthChanged -= OnHpChanged;
     }
 
     private void Update()
@@ -189,19 +200,27 @@ public class BattleUI : MonoBehaviour
             if (show != scoreboardPanel.activeSelf)
             {
                 scoreboardPanel.SetActive(show);
+                _scoreboardRefreshTimer = 0f;
                 if (show) RefreshScoreboard();
             }
             else if (show)
             {
-                RefreshScoreboard();
+                _scoreboardRefreshTimer += Time.deltaTime;
+                if (_scoreboardRefreshTimer >= ScoreboardRefreshInterval)
+                {
+                    _scoreboardRefreshTimer = 0f;
+                    RefreshScoreboard();
+                }
             }
         }
 
-        // 更新网络状态显示
-        UpdateNetworkStatus();
-
-        // 更新弹药显示
-        UpdateAmmoDisplay();
+        _hudRefreshTimer += Time.deltaTime;
+        if (_hudRefreshTimer >= HudRefreshInterval)
+        {
+            _hudRefreshTimer = 0f;
+            UpdateNetworkStatus();
+            UpdateAmmoDisplay();
+        }
 
         // 准星扩散
         UpdateCrosshairBloom();
@@ -231,7 +250,6 @@ public class BattleUI : MonoBehaviour
 
     private void OnHpChanged(int playerId, int newHp)
     {
-        Debug.Log($"[BattleUI] OnHpChanged: playerId={playerId} newHp={newHp} localPlayerId={BattleClient.Instance?.BattlePlayerId}");
         // 只更新本地玩家的血条
         if (BattleClient.Instance != null && playerId == BattleClient.Instance.BattlePlayerId)
         {
@@ -291,14 +309,22 @@ public class BattleUI : MonoBehaviour
 
         if (ammoText != null)
         {
-            ammoText.text = $"{currentAmmo}/{maxAmmo}";
-            ammoText.color = currentAmmo == 0 ? Color.red :
-                             currentAmmo <= 5 ? Color.yellow : Color.white;
+            if (currentAmmo != _lastCurrentAmmo || maxAmmo != _lastMaxAmmo)
+            {
+                ammoText.SetText("{0}/{1}", currentAmmo, maxAmmo);
+                ammoText.color = currentAmmo == 0 ? Color.red :
+                                 currentAmmo <= 5 ? Color.yellow : Color.white;
+                _lastCurrentAmmo = currentAmmo;
+                _lastMaxAmmo = maxAmmo;
+            }
         }
 
         if (reloadText != null)
         {
-            reloadText.gameObject.SetActive(isReloading);
+            if (!_hasReloadState || isReloading != _lastReloading)
+                reloadText.gameObject.SetActive(isReloading);
+            _lastReloading = isReloading;
+            _hasReloadState = true;
         }
     }
 
@@ -331,7 +357,17 @@ public class BattleUI : MonoBehaviour
 
         if (deathsText != null)
         {
-            deathsText.text = $"死亡: {deaths}";
+            bool isDeathmatch = BattleClient.Instance != null
+                && BattleClient.Instance.CurrentGameMode == 1;
+            if (isDeathmatch)
+            {
+                int maximumLives = Mathf.Max(1, BattleClient.Instance.LivesPerPlayer);
+                deathsText.text = $"生命: {Mathf.Max(0, maximumLives - deaths)}";
+            }
+            else
+            {
+                deathsText.text = $"死亡: {deaths}";
+            }
         }
     }
 
@@ -356,7 +392,11 @@ public class BattleUI : MonoBehaviour
 
         float spread = ClientECSWorld.Instance != null ? ClientECSWorld.Instance.CurrentSpreadDeg : 0f;
         float scale = 1f + spread * 0.15f;
-        crosshair.rectTransform.localScale = new Vector3(scale, scale, 1f);
+        if (Mathf.Abs(scale - _lastCrosshairScale) > 0.001f)
+        {
+            crosshair.rectTransform.localScale = new Vector3(scale, scale, 1f);
+            _lastCrosshairScale = scale;
+        }
     }
 
     #endregion
@@ -482,7 +522,12 @@ public class BattleUI : MonoBehaviour
 
             var e = entries[i];
             string medal = i == 0 ? "★ " : $"{i + 1}. ";
-            row.text = $"{medal}{e.name}    <color=#7f7>{e.kills}</color> / <color=#f77>{e.deaths}</color>";
+            bool isDeathmatch = BattleClient.Instance != null
+                && BattleClient.Instance.CurrentGameMode == 1;
+            string secondaryScore = isDeathmatch
+                ? $"生命 {Mathf.Max(0, Mathf.Max(1, BattleClient.Instance.LivesPerPlayer) - e.deaths)}"
+                : $"死亡 {e.deaths}";
+            row.text = $"{medal}{e.name}    <color=#7f7>击杀 {e.kills}</color> / <color=#f77>{secondaryScore}</color>";
             row.color = e.isLocal ? new Color(1f, 0.9f, 0.4f) : Color.white;
             row.gameObject.SetActive(true);
         }
@@ -680,11 +725,21 @@ public class BattleUI : MonoBehaviour
         if (pingText != null && BattleClient.Instance != null)
         {
             float rtt = BattleClient.Instance.SmoothedRtt;
-            pingText.text = $"RTT: {rtt * 1000:F0}ms";
+            int pingMs = Mathf.RoundToInt(rtt * 1000f);
+            int pingTier = rtt < 0.05f ? 0 : rtt < 0.1f ? 1 : 2;
+            if (pingMs != _lastPingMs)
+            {
+                pingText.SetText("RTT: {0}ms", pingMs);
+                _lastPingMs = pingMs;
+            }
 
             // 根据延迟变色
-            pingText.color = rtt < 0.05f ? Color.green :
-                             rtt < 0.1f ? Color.yellow : Color.red;
+            if (pingTier != _lastPingTier)
+            {
+                pingText.color = pingTier == 0 ? Color.green :
+                                 pingTier == 1 ? Color.yellow : Color.red;
+                _lastPingTier = pingTier;
+            }
         }
     }
 
@@ -702,7 +757,7 @@ public class BattleUI : MonoBehaviour
         if (_fpsUpdateTimer >= 0.5f)
         {
             _fps = _frameCount / _fpsUpdateTimer;
-            fpsText.text = $"FPS: {_fps:F0}";
+            fpsText.SetText("FPS: {0}", Mathf.RoundToInt(_fps));
 
             _frameCount = 0;
             _fpsUpdateTimer = 0f;
@@ -727,6 +782,7 @@ public class BattleUI : MonoBehaviour
         scaler.referenceResolution = new Vector2(1920, 1080);
         scaler.matchWidthOrHeight = 0.5f;
         canvasGo.AddComponent<GraphicRaycaster>();
+        var layout = ReferenceHudLayout.Ensure(canvasGo.transform);
 
         // EventSystem：战斗内不需要 UI 交互（Tab 记分板也不走 EventSystem），
         // EventSystem+InputModule 会吞键盘鼠标事件导致游戏输入失效——直接禁用
@@ -757,16 +813,20 @@ public class BattleUI : MonoBehaviour
             Debug.LogWarning("[BattleUI] 未找到中文字体，中文可能显示为方块");
 
         // 创建各部分 UI
-        CreateHealthBarUI(canvasGo.transform, font);
-        CreateAmmoUI(canvasGo.transform, font);
-        CreateCrosshairUI(canvasGo.transform);
-        CreateScoreUI(canvasGo.transform, font);
-        CreateKillFeedUI(canvasGo.transform, font);
-        CreateKillBannerUI(canvasGo.transform, font);
-        CreateScoreboardUI(canvasGo.transform, font);
-        CreateGameOverPanelUI(canvasGo.transform, font);
-        CreateMatchingPanelUI(canvasGo.transform, font);
-        CreateNetworkStatusUI(canvasGo.transform, font);
+        var upper = layout != null ? layout.Upper : canvasGo.transform;
+        var lower = layout != null ? layout.Lower : canvasGo.transform;
+        var center = layout != null ? layout.Center : canvasGo.transform;
+        var overlay = layout != null ? layout.Overlay : canvasGo.transform;
+        CreateHealthBarUI(lower, font);
+        CreateAmmoUI(lower, font);
+        CreateCrosshairUI(center);
+        CreateScoreUI(upper, font);
+        CreateKillFeedUI(upper, font);
+        CreateKillBannerUI(center, font);
+        CreateScoreboardUI(overlay, font);
+        CreateGameOverPanelUI(overlay, font);
+        CreateMatchingPanelUI(overlay, font);
+        CreateNetworkStatusUI(upper, font);
 
         // 技能栏（Q/E）——之前是死代码，挂到本对象上启用
         if (AbilityBar.Instance == null)
@@ -830,9 +890,9 @@ public class BattleUI : MonoBehaviour
         var panel = new GameObject("HealthPanel");
         panel.transform.SetParent(canvasTransform, false);
         var panelRect = panel.AddComponent<RectTransform>();
-        panelRect.anchorMin = new Vector2(0.01f, 0.95f);
-        panelRect.anchorMax = new Vector2(0.01f, 0.95f);
-        panelRect.pivot = new Vector2(0f, 1f);
+        panelRect.anchorMin = new Vector2(0.02f, 0.05f);
+        panelRect.anchorMax = new Vector2(0.02f, 0.05f);
+        panelRect.pivot = new Vector2(0f, 0f);
         panelRect.sizeDelta = new Vector2(300, 60);
 
         // 背景
@@ -916,19 +976,19 @@ public class BattleUI : MonoBehaviour
         var panel = new GameObject("AmmoPanel");
         panel.transform.SetParent(canvasTransform, false);
         var panelRect = panel.AddComponent<RectTransform>();
-        panelRect.anchorMin = new Vector2(0.01f, 0.88f);
-        panelRect.anchorMax = new Vector2(0.01f, 0.88f);
-        panelRect.pivot = new Vector2(0f, 1f);
+        panelRect.anchorMin = new Vector2(0.98f, 0.05f);
+        panelRect.anchorMax = new Vector2(0.98f, 0.05f);
+        panelRect.pivot = new Vector2(1f, 0f);
         panelRect.sizeDelta = new Vector2(180, 40);
 
-        ammoText = CreateTMPText(panel.transform, "AmmoText", "30/30", font, 28, Color.white, TextAlignmentOptions.Left);
+        ammoText = CreateTMPText(panel.transform, "AmmoText", "30/30", font, 28, Color.white, TextAlignmentOptions.Right);
         var aRect = ammoText.GetComponent<RectTransform>();
         aRect.anchorMin = Vector2.zero;
         aRect.anchorMax = Vector2.one;
         aRect.offsetMin = Vector2.zero;
         aRect.offsetMax = Vector2.zero;
 
-        reloadText = CreateTMPText(panel.transform, "ReloadText", "换弹中...", font, 16, new Color(1f, 0.8f, 0f), TextAlignmentOptions.Left);
+        reloadText = CreateTMPText(panel.transform, "ReloadText", "换弹中...", font, 16, new Color(1f, 0.8f, 0f), TextAlignmentOptions.Right);
         var rRect = reloadText.GetComponent<RectTransform>();
         rRect.anchorMin = new Vector2(0f, -0.5f);
         rRect.anchorMax = new Vector2(1f, -0.1f);
@@ -1013,7 +1073,7 @@ public class BattleUI : MonoBehaviour
         var kRect = killsText.GetComponent<RectTransform>();
         kRect.sizeDelta = new Vector2(90, 26);
 
-        deathsText = CreateTMPText(panel.transform, "DeathsText", "死亡: 0", font, 20, new Color(1f, 0.4f, 0.4f), TextAlignmentOptions.Right);
+        deathsText = CreateTMPText(panel.transform, "DeathsText", "生命: 3", font, 20, new Color(1f, 0.4f, 0.4f), TextAlignmentOptions.Right);
         var dRect = deathsText.GetComponent<RectTransform>();
         dRect.sizeDelta = new Vector2(90, 26);
     }

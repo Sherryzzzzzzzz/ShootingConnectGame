@@ -2,7 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
+using ShootingGame.Shared.Ability;
 using ShootingGame.Shared.ECS;
+using ShootingGame.Shared.GameplayTags;
+using ShootingGame.Shared.Hero;
 using ShootingGame.Shared.Protocol;
 using ShootingGame.Shared.Simulation;
 using ShootingGame.Shared.Physics;
@@ -30,6 +33,9 @@ namespace ShootingGame.Network.Server
     /// </summary>
     public class HostBattleServer : MonoBehaviour
     {
+        private const int SnapshotIntervalTicks = 2;
+        private const int FullSnapshotIntervalTicks = 10;
+
         /// <summary>由 PlayerCombatBehaviour RPC 入队的待处理攻击</summary>
         public static readonly System.Collections.Generic.Queue<AttackEntry> PendingAttacks =
             new System.Collections.Generic.Queue<AttackEntry>();
@@ -38,21 +44,34 @@ namespace ShootingGame.Network.Server
         [SerializeField] private float _tickInterval = 1f / 60f;
 
         private readonly Dictionary<int, PlayerSlot> _players = new Dictionary<int, PlayerSlot>();
+        private readonly Dictionary<int, BattlePlayerInfo> _playerSelections = new Dictionary<int, BattlePlayerInfo>();
+        private readonly List<SpawnPointMsg> _spawnPoints = new List<SpawnPointMsg>();
+        private readonly List<HitEventMsg> _pendingHitEvents = new List<HitEventMsg>(8);
+        private readonly List<AbilityEventData> _pendingAbilityConfirmations = new List<AbilityEventData>(4);
+        private readonly object _selectionLock = new object();
         private readonly Dictionary<int, int> _udpToPlayerId = new Dictionary<int, int>(); // UDP clientId → BattlePlayerId
         private CollisionWorld _collisionWorld;
+        private HostServerEcsWorld _ecsWorld;
         private ServerTransport _transport;
         private int _currentTick;
         private float _accumulator;
+        private int _battleId;
+        private int _gameMode = 1;
+        private int _livesPerPlayer = GameConstants.DeathmatchLives;
+        private bool _matchResetRequested;
+        private bool _sceneSpawnPointsAuthoritative;
 
         private class PlayerSlot
         {
             public int ClientId;
-            public PlayerSnapshot Snapshot;
             public InputFrame? LatestInput;
             public PlayerOperation? LatestOp;
             public List<AttackOperation> PendingBroadcastAttacks;
             public bool IsReady;
-            public float ReloadTimer;
+            public int Kills;
+            public int Deaths;
+            public int RespawnTick;
+            public int LastSpawnIndex = -1;
             public ShootingGame.Shared.Hero.GunConfigData Gun;  // 从 HeroRegistry 解析
             public ShootingGame.Shared.Hero.HeroConfig HeroCfg; // 从 HeroRegistry 解析
         }
@@ -62,6 +81,8 @@ namespace ShootingGame.Network.Server
         private void Awake()
         {
             _tickInterval = 1f / _tickRate;
+            GameplayTagConfig.Initialize();
+            HeroRegistry.Initialize();
             // 尝试加载和客户端一致的碰撞数据
             _collisionWorld = CollisionWorldLoader.Instance;
             if (_collisionWorld == null || _collisionWorld.Count == 0)
@@ -74,6 +95,8 @@ namespace ShootingGame.Network.Server
             {
                 Debug.Log($"[HostBattleServer] 加载碰撞数据: {_collisionWorld.Count} boxes");
             }
+
+            _ecsWorld = new HostServerEcsWorld(_collisionWorld);
         }
 
         public void StartServer(ServerTransport transport)
@@ -85,11 +108,78 @@ namespace ShootingGame.Network.Server
             Debug.Log($"[HostBattleServer] Started at {_tickRate}Hz");
         }
 
+        public void SetPlayerSelections(
+            BattleInfo battleInfo,
+            bool sceneSpawnPointsAuthoritative = false)
+        {
+            lock (_selectionLock)
+            {
+                _playerSelections.Clear();
+                _spawnPoints.Clear();
+                _sceneSpawnPointsAuthoritative = sceneSpawnPointsAuthoritative;
+                if (battleInfo == null) return;
+
+                if (battleInfo.BattleId != _battleId)
+                {
+                    _battleId = battleInfo.BattleId;
+                    _matchResetRequested = true;
+                }
+
+                _gameMode = battleInfo.GameMode;
+                _livesPerPlayer = battleInfo.LivesPerPlayer > 0
+                    ? battleInfo.LivesPerPlayer
+                    : GameConstants.DeathmatchLives;
+
+                if (battleInfo.SpawnPoints != null)
+                {
+                    foreach (var spawn in battleInfo.SpawnPoints)
+                    {
+                        _spawnPoints.Add(new SpawnPointMsg
+                        {
+                            Position = spawn.Position,
+                            Yaw = spawn.Yaw,
+                            TeamId = spawn.TeamId
+                        });
+                    }
+                }
+
+                if (battleInfo.BattlePlayers == null) return;
+                foreach (var player in battleInfo.BattlePlayers)
+                    _playerSelections[player.PlayerId] = player;
+            }
+
+            if (sceneSpawnPointsAuthoritative)
+                ApplySceneSpawnCorrections();
+        }
+
+        private void ApplySceneSpawnCorrections()
+        {
+            foreach (var (playerId, slot) in _players)
+            {
+                if (!slot.IsReady) continue;
+
+                BattlePlayerInfo selection;
+                lock (_selectionLock)
+                {
+                    if (!_playerSelections.TryGetValue(playerId, out selection))
+                        continue;
+                }
+
+                PlayerSnapshot snapshot = _ecsWorld.GetSnapshot(playerId, _currentTick);
+                snapshot.Position = selection.SpawnPosition;
+                snapshot.Velocity = new SharedVec3(0f, 0f, 0f);
+                snapshot.VerticalVelocity = 0f;
+                _ecsWorld.ApplySnapshot(playerId, snapshot);
+                slot.LastSpawnIndex = FindSpawnIndex(selection.SpawnPosition);
+            }
+        }
+
         public void StopServer()
         {
             IsRunning = false;
             if (_transport != null)
                 _transport.OnMessageReceived -= OnBattleMessage;
+            _ecsWorld?.Clear();
         }
 
         private void OnDestroy()
@@ -101,6 +191,8 @@ namespace ShootingGame.Network.Server
         {
             if (!IsRunning) return;
 
+            ApplyPendingMatchReset();
+
             _accumulator += Time.unscaledDeltaTime;
             while (_accumulator >= _tickInterval)
             {
@@ -109,15 +201,38 @@ namespace ShootingGame.Network.Server
             }
         }
 
+        private void ApplyPendingMatchReset()
+        {
+            lock (_selectionLock)
+            {
+                if (!_matchResetRequested) return;
+                _matchResetRequested = false;
+            }
+
+            _ecsWorld.Clear();
+            _players.Clear();
+            _udpToPlayerId.Clear();
+            _pendingHitEvents.Clear();
+            _pendingAbilityConfirmations.Clear();
+            PendingAttacks.Clear();
+            _gameOverSent = false;
+            _currentTick = 1;
+            _accumulator = 0f;
+            Debug.Log($"[HostBattleServer] Reset match state for BattleId={_battleId}");
+        }
+
         // ==================== Tick ====================
 
         private void Tick()
         {
+            ProcessRespawns();
+
             // 0. 刷新碰撞世界（Fight 场景加载后 CollisionWorldLoader 可能有新数据）
             var world = CollisionWorldLoader.Instance;
             if (world != null && world.Count > 0 && world != _collisionWorld)
             {
                 _collisionWorld = world;
+                _ecsWorld.SetCollisionWorld(world);
                 Debug.Log($"[HostBattleServer] CollisionWorld refreshed: {_collisionWorld.Count} boxes");
             }
 
@@ -143,47 +258,37 @@ namespace ShootingGame.Network.Server
             }
 
             // 1b. 模拟所有就绪玩家 + 处理攻击
-            var hitEvents = new List<HitEventMsg>();
-
             foreach (var (clientId, slot) in _players)
             {
                 if (!slot.IsReady) continue;
 
-                // 服务端弹药消耗
-                int maxAmmo = slot.Snapshot.MaxAmmo;
-                if (slot.LatestInput?.Fire == true && slot.Snapshot.CurrentAmmo > 0 && !slot.Snapshot.IsReloading)
-                    slot.Snapshot.CurrentAmmo--;
+                // 所有玩家规则（移动、重力、碰撞、弹药和换弹）由 ECS World 执行。
+                ProcessAbilityEvents(clientId, slot);
 
-                // 服务端换弹（走枪械配置，非 GameConstants）
-                if (slot.Snapshot.IsReloading)
-                {
-                    slot.ReloadTimer -= _tickInterval;
-                    if (slot.ReloadTimer <= 0f)
-                    {
-                        slot.Snapshot.CurrentAmmo = maxAmmo;
-                        slot.Snapshot.IsReloading = false;
-                        slot.ReloadTimer = 0f;
-                    }
-                }
-                else if (slot.LatestInput?.Reload == true && slot.Snapshot.CurrentAmmo < maxAmmo)
-                {
-                    slot.Snapshot.IsReloading = true;
-                    slot.ReloadTimer = slot.Snapshot.ReloadDuration;
-                }
-                slot.Snapshot.Tick = _currentTick;
+                if (slot.LatestInput.HasValue)
+                    _ecsWorld.TickPlayer(clientId, slot.LatestInput.Value, _tickInterval);
 
                 // 处理攻击（hitscan），然后移到广播列表
                 if (slot.LatestOp?.AttackOperations != null && slot.LatestOp.AttackOperations.Count > 0)
                 {
                     foreach (var atk in slot.LatestOp.AttackOperations)
-                        ProcessAttack(clientId, atk, hitEvents);
-                    slot.PendingBroadcastAttacks = slot.LatestOp.AttackOperations;
-                    slot.LatestOp.AttackOperations = new List<AttackOperation>();
+                        ProcessAttack(clientId, atk, _pendingHitEvents);
+                    if (slot.PendingBroadcastAttacks == null)
+                        slot.PendingBroadcastAttacks = new List<AttackOperation>();
+                    slot.PendingBroadcastAttacks.AddRange(slot.LatestOp.AttackOperations);
+                    slot.LatestOp.AttackOperations.Clear();
                 }
             }
 
+            if (!ShouldBroadcastSnapshot(_currentTick))
+            {
+                _currentTick++;
+                CheckGameOver();
+                return;
+            }
+
             // 2a. 构建 BattleFrame（现有协议） + DeltaState（I帧 或 P帧）
-            bool isFull = _currentTick % 10 == 0;
+            bool isFull = _currentTick % FullSnapshotIntervalTicks == 0;
             var allOps = new List<PlayerOperation>();
             var allStates = new List<PlayerStateMsg>();
             var deltaState = new DeltaStateMsg
@@ -196,7 +301,7 @@ namespace ShootingGame.Network.Server
             foreach (var (clientId, slot) in _players)
             {
                 if (!slot.IsReady) continue;
-                var snap = slot.Snapshot;
+                var snap = _ecsWorld.GetSnapshot(clientId, _currentTick);
                 var op = slot.LatestOp;
 
                 // BattleFrame（现有）
@@ -211,7 +316,8 @@ namespace ShootingGame.Network.Server
                     IsAiming = op?.Aim ?? false,
                     IsCrouching = op?.Crouch ?? false,
                     CurrentAmmo = snap.CurrentAmmo, IsReloading = snap.IsReloading,
-                    TagBitmask = snap.TagBitmask, MaxHp = (slot.HeroCfg?.MaxHP ?? GameConstants.MaxHealth)
+                    TagBitmask = snap.TagBitmask, MaxHp = (slot.HeroCfg?.MaxHP ?? GameConstants.MaxHealth),
+                    Kills = slot.Kills, Deaths = slot.Deaths
                 });
 
                 if (op != null)
@@ -230,48 +336,43 @@ namespace ShootingGame.Network.Server
                     slot.PendingBroadcastAttacks = null;
                 }
 
-                var entityDelta = new EntityDelta { NetId = (uint)clientId };
-                var compWriter = new PacketWriter();
-
-                byte maxHp = slot.HeroCfg?.MaxHP ?? GameConstants.MaxHealth;
-                var hp = new HealthComponent(snap.Health, maxHp);
-                if (isFull || hp.HasAnyDelta)
+                if (isFull)
                 {
-                    compWriter.Reset();
-                    if (isFull) hp.WriteFull(compWriter); else hp.WriteDelta(compWriter);
-                    entityDelta.Components.Add(new ComponentDelta { ComponentTypeId = HealthComponent.ComponentTypeId, IsFull = isFull, Data = compWriter.ToArray() });
-                }
-
-                if (entityDelta.Components.Count > 0)
+                    var entityDelta = new EntityDelta { NetId = (uint)clientId };
+                    var compWriter = new PacketWriter();
+                    byte maxHp = slot.HeroCfg?.MaxHP ?? GameConstants.MaxHealth;
+                    var hp = new HealthComponent(snap.Health, maxHp);
+                    hp.WriteFull(compWriter);
+                    entityDelta.Components.Add(new ComponentDelta { ComponentTypeId = HealthComponent.ComponentTypeId, IsFull = true, Data = compWriter.ToArray() });
                     deltaState.Entities.Add(entityDelta);
-
-                // 重置脏标记
-                hp.MarkClean();
+                }
             }
 
             // 3a. 广播 BattleFrame（现有协议）
-            foreach (var (clientId, _) in _players)
+            var frame = new AllPlayerOperation
             {
-                var frame = new AllPlayerOperation
+                FrameId = _currentTick,
+                Operations = allOps,
+                PlayerStates = allStates,
+                HitEvents = _pendingHitEvents,
+                AbilityEvents = _pendingAbilityConfirmations
+            };
+            var response = new MainPack
+            {
+                RequestCode = RequestCode.Battle,
+                ActionCode = ActionCode.BattleFrame,
+                BattleInfo = new BattleInfo
                 {
-                    FrameId = _currentTick,
-                    Operations = allOps,
-                    PlayerStates = allStates,
-                    HitEvents = hitEvents
-                };
-                var response = new MainPack
-                {
-                    RequestCode = RequestCode.Battle,
-                    ActionCode = ActionCode.BattleFrame,
-                    BattleInfo = new BattleInfo
-                    {
-                        OperationId = _currentTick,
-                        AllPlayerOperations = new List<AllPlayerOperation> { frame },
-                        HitEvents = hitEvents
-                    }
-                };
-                _transport.Send(clientId, ProtobufSerializer.SerializeMainPack(response));
-            }
+                    OperationId = _currentTick,
+                    AllPlayerOperations = new List<AllPlayerOperation> { frame },
+                    HitEvents = _pendingHitEvents
+                }
+            };
+            byte[] frameBytes = ProtobufSerializer.SerializeMainPack(response);
+            foreach (var (clientId, _) in _players)
+                _transport.Send(clientId, frameBytes);
+            _pendingHitEvents.Clear();
+            _pendingAbilityConfirmations.Clear();
 
             // 3b. 广播 DeltaState（I帧每 10 tick，P帧每 tick 有变更时）
             if (deltaState.Entities.Count > 0)
@@ -295,6 +396,11 @@ namespace ShootingGame.Network.Server
             CheckGameOver();
         }
 
+        private static bool ShouldBroadcastSnapshot(int tick)
+        {
+            return tick % SnapshotIntervalTicks == 0;
+        }
+
         private bool _gameOverSent;
         private int _expectedPlayerCount = 0; // 匹配完成后由 LocalServerStarter 设置
 
@@ -312,31 +418,75 @@ namespace ShootingGame.Network.Server
             foreach (var (_, s) in _players) { if (s.IsReady) readyCount++; }
             if (readyCount < _expectedPlayerCount || readyCount < 2) return;
 
-            int aliveCount = 0;
-            int lastAliveId = -1;
+            int survivorCount = 0;
+            int lastSurvivorId = -1;
             foreach (var (pid, slot) in _players)
             {
-                if (slot.IsReady && slot.Snapshot.Health > 0)
+                if (slot.IsReady && HasRemainingLives(slot.Deaths, _livesPerPlayer))
                 {
-                    aliveCount++;
-                    lastAliveId = pid;
+                    survivorCount++;
+                    lastSurvivorId = pid;
                 }
             }
 
-            if (aliveCount <= 1)
+            if (survivorCount <= 1)
             {
                 _gameOverSent = true;
-                // 存活者队伍获胜（Player 1→Team1, Player 2→Team2）
-                int winnerTeam = lastAliveId % 2 == 1 ? 1 : 2;
-                Debug.Log($"[HostBattleServer] Game Over! Winner: player {lastAliveId} team={winnerTeam}");
+                Debug.Log($"[HostBattleServer] Game Over! Winner: player {lastSurvivorId}");
                 var gameOver = new MainPack
                 {
                     RequestCode = RequestCode.Battle,
                     ActionCode = ActionCode.GameOver,
-                    Str = winnerTeam.ToString()
+                    IntVal = 1,
+                    Str = lastSurvivorId.ToString()
                 };
+                foreach (var (pid, slot) in _players)
+                {
+                    string playerName = null;
+                    lock (_selectionLock)
+                    {
+                        if (_playerSelections.TryGetValue(pid, out var selection))
+                            playerName = selection.PlayerName;
+                    }
+                    gameOver.ScoreEntries.Add(new ScoreEntryMsg
+                    {
+                        PlayerId = pid,
+                        PlayerName = playerName,
+                        Kills = slot.Kills,
+                        Deaths = slot.Deaths
+                    });
+                }
                 var bytes = ProtobufSerializer.SerializeMainPack(gameOver);
                 foreach (var (cid, _) in _players) _transport.Send(cid, bytes);
+            }
+        }
+
+        private static bool HasRemainingLives(int deaths, int livesPerPlayer)
+        {
+            return deaths < Mathf.Max(1, livesPerPlayer);
+        }
+
+        private void ProcessRespawns()
+        {
+            foreach (var (playerId, slot) in _players)
+            {
+                if (!slot.IsReady || slot.RespawnTick <= 0 || _currentTick < slot.RespawnTick)
+                    continue;
+
+                var spawnPos = GetSpawnPos(playerId);
+                var snapshot = CreateSpawnSnapshot(slot, spawnPos);
+                _ecsWorld.RegisterPlayer(playerId, snapshot);
+                _ecsWorld.ConfigurePlayer(playerId, slot.HeroCfg, slot.Gun);
+                slot.RespawnTick = 0;
+                slot.LatestInput = null;
+                if (slot.LatestOp != null)
+                {
+                    slot.LatestOp.Fire = false;
+                    slot.LatestOp.Reload = false;
+                    slot.LatestOp.Jump = false;
+                    slot.LatestOp.AttackOperations?.Clear();
+                }
+                Debug.Log($"[HostBattleServer] Player {playerId} respawned with {_livesPerPlayer - slot.Deaths} lives remaining.");
             }
         }
 
@@ -352,7 +502,9 @@ namespace ShootingGame.Network.Server
             byte baseDamage = gun?.Damage ?? GameConstants.HitscanDamage;
             float playerHeight = attackerSlot.HeroCfg?.PlayerHeight ?? GameConstants.PlayerHeight;
 
-            var origin = attackerSlot.Snapshot.Position +
+            var attackerSnapshot = _ecsWorld.GetSnapshot(attackerId, _currentTick);
+            if (attackerSnapshot.Health <= 0) return;
+            var origin = attackerSnapshot.Position +
                 SharedVec3.Up * (playerHeight * 0.85f);
 
             float aimYaw = Mathf.Atan2(atk.TowardX, atk.TowardY) * Mathf.Rad2Deg;
@@ -366,9 +518,10 @@ namespace ShootingGame.Network.Server
             foreach (var (targetId, targetSlot) in _players)
             {
                 if (targetId == attackerId) continue;
-                if (targetSlot.Snapshot.Health <= 0) continue;
+                var targetSnapshot = _ecsWorld.GetSnapshot(targetId, _currentTick);
+                if (targetSnapshot.Health <= 0) continue;
 
-                var targetPos = targetSlot.Snapshot.Position;
+                var targetPos = targetSnapshot.Position;
                 var capsule = new Capsule(targetPos, GameConstants.PlayerHeight, GameConstants.HitCapsuleRadius);
                 var aabb = capsule.BoundingBox();
                 var ray = new ShootingGame.Shared.Physics.Ray(origin, direction);
@@ -385,11 +538,25 @@ namespace ShootingGame.Network.Server
 
 
             // 应用伤害（枪械驱动 + 距离衰减）
-            var victimSlot = _players[victimId];
+            if (victimId < 0 || !_players.ContainsKey(victimId))
+                return;
+
             int dmg = gun != null ? (int)(gun.Damage * gun.GetFalloffMultiplier(closestDist) + 0.5f) : baseDamage;
             byte damage = (byte)Mathf.Clamp(dmg, 1, 255);
-            byte newHp = (byte)Mathf.Max(0, victimSlot.Snapshot.Health - damage);
-            victimSlot.Snapshot.Health = newHp;
+            var victimSnapshot = _ecsWorld.GetSnapshot(victimId, _currentTick);
+            byte newHp = (byte)Mathf.Max(0, victimSnapshot.Health - damage);
+            _ecsWorld.TrySetHealth(victimId, newHp);
+
+            bool isKill = victimSnapshot.Health > 0 && newHp == 0;
+            if (isKill)
+            {
+                var victimSlot = _players[victimId];
+                victimSlot.Deaths++;
+                attackerSlot.Kills++;
+                victimSlot.RespawnTick = HasRemainingLives(victimSlot.Deaths, _livesPerPlayer)
+                    ? _currentTick + Mathf.CeilToInt(GameConstants.RespawnDelay * _tickRate)
+                    : 0;
+            }
 
 
             hitEvents.Add(new HitEventMsg
@@ -398,7 +565,7 @@ namespace ShootingGame.Network.Server
                 AttackerId = attackerId,
                 VictimId = victimId,
                 Damage = damage,
-                IsKill = newHp == 0,
+                IsKill = isKill,
                 HitPoint = hitPoint,
                 HitFrameId = _currentTick
             });
@@ -440,18 +607,6 @@ namespace ShootingGame.Network.Server
 
         private void HandleBattleReady(int clientId, MainPack pack)
         {
-            // 新一局：如果上一局已结束（_gameOverSent），重置服务端状态
-            if (_gameOverSent)
-            {
-                _players.Clear();
-                _udpToPlayerId.Clear();
-                _gameOverSent = false;
-                _currentTick = 1;
-                _expectedPlayerCount = 0;
-                PendingAttacks.Clear();
-                Debug.Log("[HostBattleServer] 新一局开始，已重置服务端状态");
-            }
-
             // 用 BattlePlayerId（MatchFound 分配）做 key，保证和客户端一致
             int battlePlayerId = pack.BattleInfo?.OperationId ?? clientId;
             _udpToPlayerId[clientId] = battlePlayerId;
@@ -462,22 +617,26 @@ namespace ShootingGame.Network.Server
                 _players[battlePlayerId] = slot;
             }
 
-            var spawnPos = GetSpawnPos(battlePlayerId);
-            slot.Snapshot = PlayerSnapshot.Default(spawnPos);
-            slot.IsReady = true;
-
-            // 从 HeroRegistry 加载英雄/枪械配置（默认英雄 1，后续可随大厅传 heroId 覆盖）
-            var hero = ShootingGame.Shared.Hero.HeroRegistry.GetHero(1);
+            int selectedHeroId = ShootingGame.Shared.Hero.HeroRegistry.DefaultHeroId;
+            BattlePlayerInfo selection = null;
+            lock (_selectionLock)
+            {
+                if (_playerSelections.TryGetValue(battlePlayerId, out selection) && selection.HeroId > 0)
+                    selectedHeroId = selection.HeroId;
+            }
+            var hero = ShootingGame.Shared.Hero.HeroRegistry.GetHero(selectedHeroId)
+                ?? ShootingGame.Shared.Hero.HeroRegistry.GetHero(ShootingGame.Shared.Hero.HeroRegistry.DefaultHeroId);
             slot.HeroCfg = hero;
             slot.Gun = hero?.Gun ?? ShootingGame.Shared.Hero.GunRegistry.GetGun(null);
-            if (slot.Gun != null)
-            {
-                slot.Snapshot.MaxAmmo = slot.Gun.ClipSize;
-                slot.Snapshot.CurrentAmmo = slot.Gun.ClipSize;
-                slot.Snapshot.ReloadDuration = slot.Gun.ReloadTime;
-                slot.Snapshot.FireInterval = slot.Gun.FireRate;
-            }
-            slot.Snapshot.Health = hero?.MaxHP ?? GameConstants.MaxHealth;
+
+            var spawnPos = selection != null
+                ? selection.SpawnPosition
+                : GetSpawnPos(battlePlayerId);
+            slot.LastSpawnIndex = FindSpawnIndex(spawnPos);
+            var snapshot = CreateSpawnSnapshot(slot, spawnPos);
+            slot.IsReady = true;
+            _ecsWorld.RegisterPlayer(battlePlayerId, snapshot);
+            _ecsWorld.ConfigurePlayer(battlePlayerId, hero, slot.Gun);
 
             // 回复 BattleStart
             var start = new MainPack
@@ -487,6 +646,20 @@ namespace ShootingGame.Network.Server
             };
             _transport.Send(clientId, ProtobufSerializer.SerializeMainPack(start));
             Debug.Log($"[HostBattleServer] Player {battlePlayerId} (UDP:{clientId}) is ready, spawn=({spawnPos.x:F1},{spawnPos.z:F1})");
+        }
+
+        private static PlayerSnapshot CreateSpawnSnapshot(PlayerSlot slot, SharedVec3 spawnPos)
+        {
+            var snapshot = PlayerSnapshot.Default(spawnPos);
+            if (slot.Gun != null)
+            {
+                snapshot.MaxAmmo = slot.Gun.ClipSize;
+                snapshot.CurrentAmmo = slot.Gun.ClipSize;
+                snapshot.ReloadDuration = slot.Gun.ReloadTime;
+                snapshot.FireInterval = slot.Gun.FireRate;
+            }
+            snapshot.Health = slot.HeroCfg?.MaxHP ?? GameConstants.MaxHealth;
+            return snapshot;
         }
 
         private void HandleBattleOperation(int clientId, MainPack pack)
@@ -508,57 +681,108 @@ namespace ShootingGame.Network.Server
             if (_players.TryGetValue(playerId, out var slot))
             {
                 slot.LatestInput = input;
-                // 直接用客户端预测位置——不服务端模拟
-                slot.Snapshot.Position = new SharedVec3(op.PosX, op.PosY, op.PosZ);
-                slot.Snapshot.Velocity = new SharedVec3(op.VelX, 0, op.VelZ);
-                slot.Snapshot.IsGrounded = op.IsGrounded;
                 if (slot.LatestOp?.AttackOperations != null && slot.LatestOp.AttackOperations.Count > 0)
                     op.AttackOperations.InsertRange(0, slot.LatestOp.AttackOperations);
                 slot.LatestOp = op;
             }
         }
 
-        private static SharedVec3 GetSpawnPos(int playerId)
+        private void ProcessAbilityEvents(int playerId, PlayerSlot slot)
         {
-            var candidates = new System.Collections.Generic.List<Vector3>();
-            var world = CollisionWorldLoader.Instance; // 同进程内共享碰撞数据
+            var events = slot.LatestOp?.AbilityEvents;
+            if (events == null || events.Count == 0)
+                return;
 
-            // 从 SpawnPoints.json 加载候选点
-            try
+            foreach (var evt in events)
             {
-                var cfg = Resources.Load<TextAsset>("SpawnPoints");
-                if (cfg != null)
+                if (evt.EventType != AbilityEventType.RequestActivate)
+                    continue;
+
+                ushort serverInstanceId = _ecsWorld.TryActivateAbility(playerId, evt.AssetId);
+                _pendingAbilityConfirmations.Add(new AbilityEventData
                 {
-                    var json = JsonUtility.FromJson<SpawnPointsWrapper>(cfg.text);
-                    if (json?.spawnPoints?.Count > 0)
+                    PlayerId = (byte)playerId,
+                    InstanceId = evt.InstanceId,
+                    AssetId = evt.AssetId,
+                    EventType = serverInstanceId > 0
+                        ? AbilityEventType.ConfirmActivate
+                        : AbilityEventType.RejectActivate
+                });
+            }
+
+            events.Clear();
+        }
+
+        private SharedVec3 GetSpawnPos(int playerId)
+        {
+            var world = CollisionWorldLoader.Instance;
+            int selectedIndex = -1;
+            float bestSafety = float.NegativeInfinity;
+            int previousIndex = _players.TryGetValue(playerId, out var playerSlot)
+                ? playerSlot.LastSpawnIndex
+                : -1;
+
+            lock (_selectionLock)
+            {
+                for (int i = 0; i < _spawnPoints.Count; i++)
+                {
+                    if (_spawnPoints.Count > 1 && i == previousIndex)
+                        continue;
+
+                    var candidate = new Vector3(
+                        _spawnPoints[i].Position.x,
+                        _spawnPoints[i].Position.y,
+                        _spawnPoints[i].Position.z);
+                    if (!_sceneSpawnPointsAuthoritative
+                        && !SpawnValidator.IsSpawnValid(candidate, world))
+                        continue;
+
+                    float minimumEnemyDistance = float.PositiveInfinity;
+                    foreach (var (otherId, otherSlot) in _players)
                     {
-                        foreach (var sp in json.spawnPoints)
-                            candidates.Add(new Vector3(sp.x, sp.y, sp.z));
+                        if (otherId == playerId || !otherSlot.IsReady
+                            || !HasRemainingLives(otherSlot.Deaths, _livesPerPlayer))
+                            continue;
+                        var other = _ecsWorld.GetSnapshot(otherId, _currentTick).Position;
+                        float dx = candidate.x - other.x;
+                        float dy = candidate.y - other.y;
+                        float dz = candidate.z - other.z;
+                        float distanceSquared = dx * dx + dy * dy + dz * dz;
+                        if (distanceSquared < minimumEnemyDistance)
+                            minimumEnemyDistance = distanceSquared;
+                    }
+
+                    if (minimumEnemyDistance > bestSafety)
+                    {
+                        bestSafety = minimumEnemyDistance;
+                        selectedIndex = i;
                     }
                 }
-            }
-            catch { }
 
-            if (candidates.Count > 0)
-            {
-                // 打乱顺序，选第一个合法的
-                ShuffleCandidates(candidates);
-                for (int i = 0; i < candidates.Count; i++)
+                if (selectedIndex >= 0)
                 {
-                    if (SpawnValidator.IsSpawnValid(candidates[i], world))
-                    {
-                        var v = candidates[i];
-                        Debug.Log($"[HostSpawn] Player {playerId} → ({v.x:F1},{v.z:F1})");
-                        return new SharedVec3(v.x, v.y, v.z);
-                    }
+                    var selected = _spawnPoints[selectedIndex].Position;
+                    if (playerSlot != null) playerSlot.LastSpawnIndex = selectedIndex;
+                    Debug.Log($"[HostSpawn] Player {playerId} -> ({selected.x:F1},{selected.z:F1}) index={selectedIndex}");
+                    return selected;
                 }
-                // 全部不合法 → 螺旋搜索
-                var fb = candidates[0];
-                Debug.LogWarning($"[HostSpawn] 所有预设点不合法，从 ({fb.x:F1},{fb.z:F1}) 开始搜索...");
-                var found = SpawnValidator.FindNearestValidSpawn(fb, world);
-                return new SharedVec3(found.x, found.y, found.z);
+
+                if (_spawnPoints.Count > 0)
+                {
+                    var first = _spawnPoints[0].Position;
+                    if (_sceneSpawnPointsAuthoritative)
+                    {
+                        if (playerSlot != null) playerSlot.LastSpawnIndex = 0;
+                        return first;
+                    }
+                    var fallback = new Vector3(first.x, first.y, first.z);
+                    var found = SpawnValidator.FindNearestValidSpawn(fallback, world);
+                    if (playerSlot != null) playerSlot.LastSpawnIndex = 0;
+                    return new SharedVec3(found.x, found.y, found.z);
+                }
             }
-            Debug.LogWarning($"[HostSpawn] SpawnPoints.json 为空或无候选点，使用回退位置");
+
+            Debug.LogWarning("[HostSpawn] No configured spawn point; using fallback position.");
 
             // Fallback：SpawnPoints.json 不存在时使用默认位置
             float fx = (playerId - 1) * 12f - 6f;
@@ -566,18 +790,17 @@ namespace ShootingGame.Network.Server
             return new SharedVec3(fx, 0.1f, fz);
         }
 
-        private static void ShuffleCandidates(System.Collections.Generic.IList<Vector3> list)
+        private int FindSpawnIndex(SharedVec3 position)
         {
-            for (int i = list.Count - 1; i > 0; i--)
+            lock (_selectionLock)
             {
-                int j = UnityEngine.Random.Range(0, i + 1);
-                (list[i], list[j]) = (list[j], list[i]);
+                for (int i = 0; i < _spawnPoints.Count; i++)
+                {
+                    if (SharedVec3.SqrDistance(_spawnPoints[i].Position, position) < 0.01f)
+                        return i;
+                }
             }
+            return -1;
         }
-
-        [System.Serializable]
-        private class SpawnPointsWrapper { public List<SpawnEntry> spawnPoints; }
-        [System.Serializable]
-        private class SpawnEntry { public float x; public float y; public float z; public float yaw; public int teamId; }
     }
 }

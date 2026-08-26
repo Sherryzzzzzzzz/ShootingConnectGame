@@ -11,7 +11,10 @@ namespace ShootingGame.Shared.Simulation
         // 移动
         public const float MoveSpeed = 6f;
         public const float RunMultiplier = 1.5f;
-        public const float RotationSpeed = 720f;
+        public const float MovementAcceleration = 12f;
+        public const float MovementStopAcceleration = 16f;
+        public const float AimMoveMultiplier = 0.38f;
+        public const float RotationSpeed = 360f;
 
         // 物理（委托给 PhysicsConstants，保证单一数据源）
         public const float Gravity = PhysicsConstants.Gravity;
@@ -33,6 +36,7 @@ namespace ShootingGame.Shared.Simulation
         public const byte HitscanDamage = 25;
         public const float HitscanRange = 200f;
         public const float RespawnDelay = 3f;
+        public const int DeathmatchLives = 3;
 
         // 身体部位伤害倍率
         public const float HeadDamageMultiplier = 2.0f;
