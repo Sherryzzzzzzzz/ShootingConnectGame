@@ -22,7 +22,6 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
     private float _remainingSeconds = GameConstants.MatchDurationSeconds;
     private bool _built;
     private int _lastAmmo = -1;
-    private BattleManager.BattleState _lastState;
     private readonly Vector2[] _shellBasePositions = new Vector2[4];
     private readonly RectTransform[] _shellRects = new RectTransform[4];
     private readonly Vector2[] _shellStartPositions = new Vector2[4];
@@ -32,7 +31,9 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
     private float _shellShotDuration;
     private int _ejectIndex = -1;
     private int _shotVisibleCount;
-    private int _pendingShots;
+    private readonly int[] _queuedShotAmmo = new int[GameConstants.MaxAmmoPerClip];
+    private int _queuedShotRead;
+    private int _queuedShotWrite;
     private readonly float[] _shellShiftDelays = new float[4];
     private bool _shellShotAnimating;
 
@@ -42,11 +43,32 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
         Build();
     }
 
+    /// <summary>Replaces the saved visual root while the Fight scene is open in the editor.</summary>
+    public void RebuildInEditor()
+    {
+        var existingRoot = transform.Find(RootName);
+        if (existingRoot != null)
+        {
+            // The feed belongs to BattleUI; preserve it while replacing only the skin root.
+            var feed = existingRoot.Find("KillFeedPanel");
+            if (feed != null)
+                feed.SetParent(transform.Find("UIUpperBase") ?? transform, false);
+            DestroyImmediate(existingRoot.gameObject);
+        }
+        _built = false;
+        _score = null;
+        _timer = null;
+        _ammo = null;
+        _shells = new Image[4];
+        Build();
+    }
+
     private void OnEnable()
     {
         _remainingSeconds = GameConstants.MatchDurationSeconds;
         _lastAmmo = -1;
-        _lastState = BattleManager.BattleState.None;
+        _queuedShotRead = 0;
+        _queuedShotWrite = 0;
         var existingRoot = transform.Find(RootName);
         if (existingRoot != null)
         {
@@ -191,12 +213,9 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
 
     private void UpdateTimer()
     {
-        var state = BattleManager.Instance != null ? BattleManager.Instance.State : BattleManager.BattleState.None;
-        if (state == BattleManager.BattleState.Playing && _lastState != BattleManager.BattleState.Playing)
-            _remainingSeconds = GameConstants.MatchDurationSeconds;
-        _lastState = state;
-        if (state == BattleManager.BattleState.Playing)
-            _remainingSeconds = Mathf.Max(0f, _remainingSeconds - Time.deltaTime);
+        var client = BattleClient.Instance;
+        if (client != null && client.ServerMatchRemainingTicks >= 0)
+            _remainingSeconds = client.ServerMatchRemainingTicks * GameConstants.TickDelta;
         _timer?.SetText("{0:000}.{1:00}", Mathf.FloorToInt(_remainingSeconds), Mathf.FloorToInt((_remainingSeconds % 1f) * 100f));
         if (_timer != null && _remainingSeconds <= 3f)
             _timer.color = Color.Lerp(new Color(1f, 0.94f, 0.2f), Color.red, Mathf.PingPong(Time.unscaledTime * 3f, 1f));
@@ -218,12 +237,7 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
         if (_lastAmmo < 0)
             ResetShellLayout(current);
         else if (current < _lastAmmo)
-        {
-            if (_shellShotAnimating)
-                _pendingShots++;
-            else
-                StartShellShot(current);
-        }
+            QueueShellShots(_lastAmmo, current);
         else if (current > _lastAmmo)
             ResetShellLayout(current);
         _lastAmmo = current;
@@ -295,11 +309,7 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
         }
         _shellShotAnimating = false;
         _ejectIndex = -1;
-        if (_pendingShots > 0)
-        {
-            _pendingShots--;
-            StartShellShot(_lastAmmo);
-        }
+        TryStartQueuedShellShot();
     }
 
     private void ResetShellLayout(int currentAmmo)
@@ -308,7 +318,8 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
         int start = _shells.Length - visible;
         _shellShotAnimating = false;
         _ejectIndex = -1;
-        _pendingShots = 0;
+        _queuedShotRead = 0;
+        _queuedShotWrite = 0;
         for (int i = 0; i < _shells.Length; i++)
         {
             if (_shells[i] == null)
@@ -351,7 +362,7 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
         _ejectIndex = _activeShellIndices[activeCount - 1];
         _shotVisibleCount = Mathf.Clamp(Mathf.Min(currentAmmo, _shells.Length), 0, _shells.Length);
         int survivorCount = activeCount - 1;
-        int targetStart = _shells.Length - Mathf.Min(_shotVisibleCount, survivorCount);
+        int targetStart = _shells.Length - survivorCount;
         int survivor = 0;
         for (int i = 0; i < activeCount; i++)
         {
@@ -362,11 +373,30 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
                 continue;
             int targetSlot = Mathf.Clamp(targetStart + survivor++, 0, _shells.Length - 1);
             _shellTargets[shellIndex] = _shellBasePositions[targetSlot];
-            _shellShiftDelays[shellIndex] = Mathf.Max(0, survivorCount - survivor - 1) * 0.05f;
+            // The neighbour of the ejected shell fills the rightmost slot first.
+            _shellShiftDelays[shellIndex] = 0.24f + Mathf.Max(0, survivorCount - survivor) * 0.07f;
         }
         _shellShotElapsed = 0f;
-        _shellShotDuration = 0.24f + Mathf.Max(0f, (survivorCount - 1) * 0.05f) + 0.18f;
+        _shellShotDuration = 0.24f + survivorCount * 0.07f + 0.18f;
         _shellShotAnimating = true;
+    }
+
+    private void QueueShellShots(int previousAmmo, int currentAmmo)
+    {
+        for (int ammoAfterShot = previousAmmo - 1; ammoAfterShot >= currentAmmo; ammoAfterShot--)
+        {
+            if (!_shellShotAnimating && _queuedShotRead == _queuedShotWrite)
+                StartShellShot(ammoAfterShot);
+            else if (_queuedShotWrite - _queuedShotRead < _queuedShotAmmo.Length)
+                _queuedShotAmmo[_queuedShotWrite++ % _queuedShotAmmo.Length] = ammoAfterShot;
+        }
+    }
+
+    private void TryStartQueuedShellShot()
+    {
+        if (_queuedShotRead >= _queuedShotWrite)
+            return;
+        StartShellShot(_queuedShotAmmo[_queuedShotRead++ % _queuedShotAmmo.Length]);
     }
 
     private static RectTransform CreateBand(Transform parent, string name, bool topBand, Vector2 min, Vector2 max, Vector2 pivot, Vector2 size)
@@ -452,6 +482,9 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
             }
         }
 
+        SetLegacyTopPanelVisible("ScorePanel", false);
+        SetLegacyTopPanelVisible("NetworkStatusPanel", false);
+
         var health = transform.Find("UILowerBase/HealthPanel") ?? transform.Find("HealthPanel");
         if (health == null)
             return;
@@ -462,5 +495,12 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
         rect.anchorMax = new Vector2(0.40f, 0.25f);
         rect.offsetMin = Vector2.zero;
         rect.offsetMax = Vector2.zero;
+    }
+
+    private void SetLegacyTopPanelVisible(string name, bool visible)
+    {
+        var panel = transform.Find($"UIUpperBase/{name}") ?? transform.Find(name);
+        if (panel != null)
+            panel.gameObject.SetActive(visible);
     }
 }

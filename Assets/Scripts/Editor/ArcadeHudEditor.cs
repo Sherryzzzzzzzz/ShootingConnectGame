@@ -52,7 +52,7 @@ public static class ArcadeHudEditor
         {
             visuals = Undo.AddComponent<ArcadeHudVisuals>(canvas.gameObject);
         }
-        visuals.GenerateInEditor();
+        visuals.RebuildInEditor();
 
         var abilityBar = battleUi.GetComponent<AbilityBar>();
         if (abilityBar != null)

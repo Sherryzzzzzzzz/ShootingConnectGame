@@ -362,6 +362,7 @@ namespace ShootingGame.Network.Server
             {
                 RequestCode = RequestCode.Battle,
                 ActionCode = ActionCode.BattleFrame,
+                Timestamp = GetRemainingMatchTicks(),
                 BattleInfo = new BattleInfo
                 {
                     OperationId = _currentTick,
@@ -408,6 +409,14 @@ namespace ShootingGame.Network.Server
 
         public void SetExpectedPlayerCount(int count) { _expectedPlayerCount = count; }
 
+        private int GetRemainingMatchTicks()
+        {
+            int durationTicks = Mathf.CeilToInt(GameConstants.MatchDurationSeconds * _tickRate);
+            if (_battleStartTick < 0)
+                return durationTicks;
+            return Mathf.Max(0, durationTicks - (_currentTick - _battleStartTick));
+        }
+
         /// <summary>
         /// 检查游戏是否结束。等全员 BattleReady 后才开始判定。
         /// </summary>
@@ -423,7 +432,7 @@ namespace ShootingGame.Network.Server
             if (_battleStartTick < 0)
                 _battleStartTick = _currentTick;
 
-            bool timedOut = (_currentTick - _battleStartTick) * _tickInterval >= GameConstants.MatchDurationSeconds;
+            bool timedOut = GetRemainingMatchTicks() <= 0;
 
             int survivorCount = 0;
             int lastSurvivorId = -1;

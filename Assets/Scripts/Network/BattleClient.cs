@@ -26,6 +26,7 @@ public class BattleClient : MonoBehaviour
     public int BattlePlayerId { get; private set; }
     public int TeamId { get; private set; }
     public int ServerFrameId { get; private set; }
+    public int ServerMatchRemainingTicks { get; private set; } = -1;
     public float SmoothedRtt { get; private set; } = 0.05f;
 
     // Network
@@ -455,6 +456,7 @@ public class BattleClient : MonoBehaviour
         IsInBattle = true;
         _clientFrameId = 1;
         ServerFrameId = 1;
+        ServerMatchRemainingTicks = -1;
 
         Debug.Log("[BattleClient] Battle started!");
         OnBattleStart?.Invoke();
@@ -465,6 +467,8 @@ public class BattleClient : MonoBehaviour
         if (pack.BattleInfo == null) return;
 
         ServerFrameId = pack.BattleInfo.OperationId;
+        if (pack.Timestamp >= 0)
+            ServerMatchRemainingTicks = (int)Mathf.Min(int.MaxValue, pack.Timestamp);
 
         foreach (var frame in pack.BattleInfo.AllPlayerOperations)
         {
