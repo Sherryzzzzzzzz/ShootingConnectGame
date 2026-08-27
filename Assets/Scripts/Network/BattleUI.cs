@@ -86,6 +86,8 @@ public class BattleUI : MonoBehaviour
     private const float ScoreboardRefreshInterval = 0.2f;
     private readonly Queue<GameObject> _killFeedItems = new Queue<GameObject>();
     private TMP_FontAsset _cjkFallbackFont;
+    private bool _hitEventSourceBound;
+    private bool _hitEventBoundToClient;
 
     // 单例
     public static BattleUI Instance { get; private set; }
@@ -120,10 +122,7 @@ public class BattleUI : MonoBehaviour
             BattleManager.Instance.OnStateChanged += OnStateChanged;
         }
 
-        if (HitEventView.Instance != null)
-        {
-            HitEventView.Instance.OnHitEvent += OnHitEvent;
-        }
+        TryBindHitEventSource();
 
         ClientPresentationEventBus.PlayerHealthChanged += OnHpChanged;
 
@@ -151,16 +150,17 @@ public class BattleUI : MonoBehaviour
             BattleManager.Instance.OnStateChanged -= OnStateChanged;
         }
 
-        if (HitEventView.Instance != null)
-        {
+        if (_hitEventBoundToClient && BattleClient.Instance != null)
+            BattleClient.Instance.OnHitEvent -= OnHitEvent;
+        else if (_hitEventSourceBound && HitEventView.Instance != null)
             HitEventView.Instance.OnHitEvent -= OnHitEvent;
-        }
 
         ClientPresentationEventBus.PlayerHealthChanged -= OnHpChanged;
     }
 
     private void Update()
     {
+        TryBindHitEventSource();
         // 更新准星闪烁
         if (_crosshairHitTimer > 0)
         {
@@ -397,6 +397,24 @@ public class BattleUI : MonoBehaviour
 
     #region 击杀信息
 
+    private void TryBindHitEventSource()
+    {
+        if (_hitEventSourceBound)
+            return;
+
+        if (BattleClient.Instance != null)
+        {
+            BattleClient.Instance.OnHitEvent += OnHitEvent;
+            _hitEventBoundToClient = true;
+            _hitEventSourceBound = true;
+        }
+        else if (HitEventView.Instance != null)
+        {
+            HitEventView.Instance.OnHitEvent += OnHitEvent;
+            _hitEventSourceBound = true;
+        }
+    }
+
     private void OnHitEvent(HitEventMsg hitEvent)
     {
         // 检查是否是击杀
@@ -443,6 +461,7 @@ public class BattleUI : MonoBehaviour
 
         // 创建击杀信息条目
         var item = Instantiate(killFeedItemPrefab, killFeedContainer);
+        item.SetActive(true);
         var text = item.GetComponent<TMP_Text>();
 
         if (text != null)

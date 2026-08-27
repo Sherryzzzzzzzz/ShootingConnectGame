@@ -28,10 +28,12 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
     private readonly Vector2[] _shellStartPositions = new Vector2[4];
     private readonly Vector2[] _shellTargets = new Vector2[4];
     private readonly int[] _activeShellIndices = new int[4];
-    private float _shellShotProgress;
+    private float _shellShotElapsed;
+    private float _shellShotDuration;
     private int _ejectIndex = -1;
     private int _shotVisibleCount;
     private int _pendingShots;
+    private readonly float[] _shellShiftDelays = new float[4];
     private bool _shellShotAnimating;
 
     /// <summary>Called by the Unity editor generator; never called from runtime startup.</summary>
@@ -233,8 +235,7 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
         if (!_shellShotAnimating)
             return;
 
-        _shellShotProgress += Time.deltaTime / 0.24f;
-        float t = Mathf.Clamp01(_shellShotProgress);
+        _shellShotElapsed += Time.deltaTime;
         for (int i = 0; i < _shells.Length; i++)
         {
             if (_shells[i] == null || !_shells[i].gameObject.activeSelf)
@@ -244,23 +245,25 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
             {
                 if (i == _ejectIndex)
                 {
-                    _shellRects[i].anchoredPosition = _shellStartPositions[i] + new Vector2(72f * t, 66f * t);
-                    _shellRects[i].localRotation = Quaternion.Euler(0f, 0f, -70f * t);
+                    float ejectT = Mathf.Clamp01(_shellShotElapsed / 0.24f);
+                    _shellRects[i].anchoredPosition = _shellStartPositions[i] + new Vector2(72f * ejectT, 66f * ejectT);
+                    _shellRects[i].localRotation = Quaternion.Euler(0f, 0f, -70f * ejectT);
                 }
                 else
                 {
-                    _shellRects[i].anchoredPosition = Vector2.Lerp(_shellStartPositions[i], _shellTargets[i], t);
+                    float shiftT = Mathf.Clamp01((_shellShotElapsed - _shellShiftDelays[i]) / 0.18f);
+                    _shellRects[i].anchoredPosition = Vector2.Lerp(_shellStartPositions[i], _shellTargets[i], shiftT);
                 }
             }
             if (i == _ejectIndex)
             {
                 var color = _shells[i].color;
-                color.a = 1f - t;
+                color.a = 1f - Mathf.Clamp01(_shellShotElapsed / 0.24f);
                 _shells[i].color = color;
             }
         }
 
-        if (t < 1f)
+        if (_shellShotElapsed < _shellShotDuration)
             return;
 
         for (int i = 0; i < _shells.Length; i++)
@@ -359,8 +362,10 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
                 continue;
             int targetSlot = Mathf.Clamp(targetStart + survivor++, 0, _shells.Length - 1);
             _shellTargets[shellIndex] = _shellBasePositions[targetSlot];
+            _shellShiftDelays[shellIndex] = Mathf.Max(0, survivorCount - survivor - 1) * 0.05f;
         }
-        _shellShotProgress = 0f;
+        _shellShotElapsed = 0f;
+        _shellShotDuration = 0.24f + Mathf.Max(0f, (survivorCount - 1) * 0.05f) + 0.18f;
         _shellShotAnimating = true;
     }
 
@@ -428,6 +433,23 @@ public sealed class ArcadeHudVisuals : MonoBehaviour
             text.outlineWidth = Mathf.Max(text.outlineWidth, 0.18f);
             text.outlineColor = Color.black;
             text.raycastTarget = false;
+        }
+
+        // Keep the kill feed above the opaque slanted top band.
+        var feed = transform.Find("UIUpperBase/KillFeedPanel") ?? transform.Find("KillFeedPanel");
+        var root = transform.Find(RootName);
+        if (feed != null && root != null)
+        {
+            feed.SetParent(root, false);
+            var feedRect = feed.GetComponent<RectTransform>();
+            if (feedRect != null)
+            {
+                feedRect.anchorMin = new Vector2(0.012f, 0.57f);
+                feedRect.anchorMax = new Vector2(0.36f, 0.84f);
+                feedRect.pivot = new Vector2(0f, 0f);
+                feedRect.offsetMin = Vector2.zero;
+                feedRect.offsetMax = Vector2.zero;
+            }
         }
 
         var health = transform.Find("UILowerBase/HealthPanel") ?? transform.Find("HealthPanel");
