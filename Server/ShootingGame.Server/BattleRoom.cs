@@ -32,45 +32,19 @@ namespace ShootingGame.Server
         private volatile bool _hasEnded;
 
         // Player readiness
-        private readonly Dictionary<int, bool> _playerReady = new Dictionary<int, bool>();
         private readonly Dictionary<int, string> _playerEndpoints = new Dictionary<int, string>();
-        private readonly HashSet<int> _disconnectedPlayers = new HashSet<int>();
+        private readonly List<ServerSnapshotProducedMessage> _snapshotMessages = new List<ServerSnapshotProducedMessage>();
 
         // Player state
-        private readonly Dictionary<int, PlayerSnapshot> _playerSnapshots = new Dictionary<int, PlayerSnapshot>();
-        private readonly Dictionary<int, int> _playerTeams = new Dictionary<int, int>();
-        private readonly Dictionary<int, int> _playerHp = new Dictionary<int, int>();
-        private readonly Dictionary<int, bool> _playerIsDead = new Dictionary<int, bool>();
-        private readonly Dictionary<int, HeroConfig> _playerHeroConfigs = new Dictionary<int, HeroConfig>();
-        private readonly Dictionary<int, GunConfigData> _playerGuns = new Dictionary<int, GunConfigData>();
-        private readonly Dictionary<int, int> _lastFireFrame = new Dictionary<int, int>();
-        private readonly Dictionary<int, float> _bloomHeat = new Dictionary<int, float>(); // 连发扩散热度(度)
-        private readonly Dictionary<int, bool> _playerIsAiming = new Dictionary<int, bool>();
-        private readonly Dictionary<int, bool> _playerIsCrouching = new Dictionary<int, bool>();
+        // Player membership only. Authoritative runtime state lives on ECS entities.
+        private readonly HashSet<int> _playerIds = new HashSet<int>();
 
-        // Input buffers (sliding window)
-        private readonly Dictionary<int, InputBuffer> _inputBuffers = new Dictionary<int, InputBuffer>();
-        private readonly Dictionary<int, int> _lastConsumedFrame = new Dictionary<int, int>();
-        private readonly Dictionary<int, bool> _prevJumpHeld = new Dictionary<int, bool>();
-        // 跳跃边沿事件队列（HandlePlayerOperation 检测，ProcessFrame 应用，避免输入消费时序丢失）
-        private readonly HashSet<int> _pendingJumps = new HashSet<int>();
-
-        // Attack retransmission
-        private readonly Dictionary<int, int> _lastProcessedAttackId = new Dictionary<int, int>();
-        private readonly Dictionary<int, List<AttackOperation>> _pendingAttacks = new Dictionary<int, List<AttackOperation>>();
-
-        // Bullet system
-        private readonly List<ServerBullet> _activeBullets = new List<ServerBullet>();
+        // Bullet system: projectile state is owned by ECS entities.
         private readonly List<HitEventMsg> _pendingHitEvents = new List<HitEventMsg>();
-
-        // Position history for lag compensation
-        private readonly Dictionary<int, Dictionary<int, Vec3>> _positionHistory = new Dictionary<int, Dictionary<int, Vec3>>();
-        private readonly List<int> _positionHistoryFrames = new List<int>();
-        private const int PositionHistorySize = 30;
+        private readonly List<DamageAppliedEvent> _damageEvents = new List<DamageAppliedEvent>();
 
         // Frame history for retransmission
         private readonly Dictionary<int, AllPlayerOperation> _frameHistory = new Dictionary<int, AllPlayerOperation>();
-        private readonly Dictionary<int, int> _playerAckedFrame = new Dictionary<int, int>();
         private const int MaxFrameHistory = 64;
 
         // Game state
@@ -79,17 +53,14 @@ namespace ShootingGame.Server
 
         // 死斗(FFA)模式状态
         private bool IsDeathmatch => Context.Mode == 1;
-        private readonly Dictionary<int, int> _kills = new Dictionary<int, int>();
-        private readonly Dictionary<int, int> _deaths = new Dictionary<int, int>();
-        private float _matchElapsed;
         private readonly Random _spawnRng = new Random();
 
         // Respawn system
-        private readonly Dictionary<int, float> _respawnTimers = new Dictionary<int, float>();
-        private readonly Dictionary<int, Vec3> _spawnPositions = new Dictionary<int, Vec3>();  // 记录出生位置，用于卡点检测
         private List<SpawnPoint> _team1SpawnPoints;
         private List<SpawnPoint> _team2SpawnPoints;
         private List<SpawnPoint> _anySpawnPoints;
+        private List<SpawnPoint> _deathmatchSpawnPoints;
+        private readonly Dictionary<int, int> _lastDeathmatchSpawnIndex = new Dictionary<int, int>();
 
         // GameOver reliable retransmission
         private int _gameOverRetransmitRemaining;
@@ -108,6 +79,7 @@ namespace ShootingGame.Server
 
         // ECS world
         private ServerECSWorld _ecsWorld;
+        private Thread _frameThread;
 
         // Frame timing
         private readonly float _frameInterval = GameConstants.TickDelta;
@@ -134,19 +106,23 @@ namespace ShootingGame.Server
         /// <summary>强制开始（跳过 BattleReady 握手，用于英雄确认后直接开始）</summary>
         public void ForceStart()
         {
-            if (!_hasStarted)
+            lock (_lock)
             {
-                _hasStarted = true;
-                // 用 bpId（与 HandleBattleReady 一致），避免 _playerReady key 混乱
-                foreach (var player in Context.Players)
+                if (!_hasStarted)
                 {
-                    int bpId = Context.GetBattlePlayerId(player.UserId);
-                    _playerReady[bpId] = true;
+                    _hasStarted = true;
+                    // Use the ECS-owned player connection state.
+                    foreach (var player in Context.Players)
+                    {
+                        int bpId = Context.GetBattlePlayerId(player.UserId);
+                        _ecsWorld.SetPlayerReady(bpId, true);
+                    }
+
+                    // 完整启动：广播 BattleStart + 启动帧循环
+                    BroadcastBattleStart();
+                    StartFrameLoop();
+                    Console.WriteLine($"[BattleRoom] ForceStart: battle {BattleId} started, frame loop launched");
                 }
-                // 完整启动：广播 BattleStart + 启动帧循环
-                BroadcastBattleStart();
-                StartFrameLoop();
-                Console.WriteLine($"[BattleRoom] ForceStart: battle {BattleId} started, frame loop launched");
             }
         }
 
@@ -167,6 +143,26 @@ namespace ShootingGame.Server
             InitializeBattle();
         }
 
+        public void ApplyHeroSelection(int userId)
+        {
+            lock (_lock)
+            {
+                if (_hasStarted || _ecsWorld == null) return;
+
+                var player = Context.Players.Find(value => value.UserId == userId);
+                if (player == null) return;
+
+                int bpId = Context.GetBattlePlayerId(userId);
+                if (!_ecsWorld.TryBuildCurrentSnapshot(bpId, 0, out var snapshot)) return;
+
+                var heroConfig = HeroRegistry.GetHero(player.HeroId)
+                    ?? HeroRegistry.GetHero(HeroRegistry.DefaultHeroId);
+                _ecsWorld.RegisterPlayer(bpId, snapshot, heroConfig);
+                _ecsWorld.SetPlayerTeam(bpId, player.TeamId);
+                Log($"Applied hero selection before start: user={userId}, bp={bpId}, hero={heroConfig?.HeroId}");
+            }
+        }
+
         /// <summary>
         /// 技能预测确认链（RPC 版）：客户端预测施法 → [ServerRpc] RequestActivateAbility
         /// → 服务器验证 + 激活 AbilityLifecycleSystem → 回程 Confirm/Reject（[ClientRpc] 语义）。
@@ -181,7 +177,7 @@ namespace ShootingGame.Server
                 int predictedId = r.ReadInt32();
                 if (!_hasStarted || _hasEnded)
                     return;
-                if (_disconnectedPlayers.Contains(bpId))
+                if (_ecsWorld.IsPlayerDisconnected(bpId))
                     return;
 
                 // 服务器权威验证 + 激活（复用现有 AbilityLifecycleSystem）
@@ -222,7 +218,12 @@ namespace ShootingGame.Server
             {
                 // Load collision world
                 _collisionWorld = new CollisionWorld();
-                if (!string.IsNullOrEmpty(Context.CollisionDataPath) && System.IO.File.Exists(Context.CollisionDataPath))
+                if (Context.CollisionData != null && Context.CollisionData.Length > 0)
+                {
+                    _collisionWorld = CollisionWorld.LoadFromBytes(Context.CollisionData);
+                    Console.WriteLine($"[BattleRoom] Loaded collision snapshot: {_collisionWorld.Count} boxes");
+                }
+                else if (!string.IsNullOrEmpty(Context.CollisionDataPath) && System.IO.File.Exists(Context.CollisionDataPath))
                 {
                     _collisionWorld = CollisionWorld.Load(Context.CollisionDataPath);
                     Console.WriteLine($"[BattleRoom] Loaded collision from {Context.CollisionDataPath}: {_collisionWorld.Count} boxes");
@@ -232,14 +233,17 @@ namespace ShootingGame.Server
                     _collisionWorld.AddBox(new AABB(new Vec3(-50, -1, -50), new Vec3(50, 0, 50)));
                     Console.WriteLine("[BattleRoom] No collision file. Using default floor.");
                 }
+                EnsureDefaultGround(_collisionWorld);
                 // Build and cache spawn point lookup
                 _team1SpawnPoints = new List<SpawnPoint>();
                 _team2SpawnPoints = new List<SpawnPoint>();
                 _anySpawnPoints = new List<SpawnPoint>();
+                _deathmatchSpawnPoints = new List<SpawnPoint>();
                 if (Context.SpawnPoints != null && Context.SpawnPoints.Count > 0)
                 {
                     foreach (var sp in Context.SpawnPoints)
                     {
+                        _deathmatchSpawnPoints.Add(sp);
                         if (sp.TeamId == 1)
                             _team1SpawnPoints.Add(sp);
                         else if (sp.TeamId == 2)
@@ -249,80 +253,80 @@ namespace ShootingGame.Server
                     }
                 }
 
+                var initialSpawns = new Dictionary<int, SpawnPoint>();
+
                 // Initialize player state
                 foreach (var player in Context.Players)
                 {
                     int bpId = Context.GetBattlePlayerId(player.UserId);
 
-                    // Look up hero config
-                    var heroConfig = HeroRegistry.GetHero(player.HeroId);
-                    if (heroConfig == null) heroConfig = HeroRegistry.GetHero(HeroRegistry.DefaultHeroId);
-                    _playerHeroConfigs[bpId] = heroConfig;
-                    _playerGuns[bpId] = heroConfig.Gun ?? GunRegistry.GetGun(heroConfig.StartingGunId);
-                    _kills[bpId] = 0;
-                    _deaths[bpId] = 0;
-                    _bloomHeat[bpId] = 0f;
-
-                    _playerReady[bpId] = false;
-                    _playerTeams[bpId] = player.TeamId;
-                    _playerHp[bpId] = heroConfig.MaxHP;
-                    _playerIsDead[bpId] = false;
-
-                    // 出生点随机选择（每次出生不同位置）
-                    Vec3 spawnPos;
+                    SpawnPoint spawnPoint;
                     if (!IsDeathmatch && player.TeamId == 1 && _team1SpawnPoints.Count > 0)
                     {
                         int idx = _spawnRng.Next(_team1SpawnPoints.Count);
-                        spawnPos = _team1SpawnPoints[idx].Position;
+                        spawnPoint = _team1SpawnPoints[idx];
                     }
                     else if (!IsDeathmatch && player.TeamId == 2 && _team2SpawnPoints.Count > 0)
                     {
                         int idx = _spawnRng.Next(_team2SpawnPoints.Count);
-                        spawnPos = _team2SpawnPoints[idx].Position;
+                        spawnPoint = _team2SpawnPoints[idx];
                     }
+                    else if (IsDeathmatch)
+                        spawnPoint = GetInitialDeathmatchSpawnPoint(bpId, _playerIds.Count);
                     else if (_anySpawnPoints.Count > 0)
-                    {
-                        int idx = _spawnRng.Next(_anySpawnPoints.Count);
-                        spawnPos = _anySpawnPoints[idx].Position;
-                    }
+                        spawnPoint = _anySpawnPoints[_spawnRng.Next(_anySpawnPoints.Count)];
                     else
                     {
                         int idx = _spawnRng.Next(DefaultSpawnPositions.Length);
-                        spawnPos = DefaultSpawnPositions[idx];
+                        spawnPoint = new SpawnPoint(DefaultSpawnPositions[idx]);
                     }
 
-                    _playerSnapshots[bpId] = PlayerSnapshot.Default(spawnPos);
-                    var snap = _playerSnapshots[bpId];
-                    snap.Health = heroConfig.MaxHP;
-                    ApplyGunToSnapshot(ref snap, _playerGuns.GetValueOrDefault(bpId));
-                    _playerSnapshots[bpId] = snap;
-                    _spawnPositions[bpId] = spawnPos;
-
-                    // Initialize input buffer
-                    _inputBuffers[bpId] = new InputBuffer();
-                    _lastConsumedFrame[bpId] = 0;
-                    _playerAckedFrame[bpId] = 0;
-
-                    // Initialize attack tracking
-                    _lastProcessedAttackId[bpId] = 0;
-                    _pendingAttacks[bpId] = new List<AttackOperation>();
-
-                    // Initialize position history
-                    _positionHistory[bpId] = new Dictionary<int, Vec3>();
+                    _playerIds.Add(bpId);
+                    initialSpawns[bpId] = spawnPoint;
 
                 }
 
-                // Initialize ECS world
-                _ecsWorld = new ServerECSWorld();
-                _ecsWorld.SetCollisionWorld(_collisionWorld);
-                foreach (var kvp in _playerSnapshots)
+                // Initialize ECS world. Player entity creation is owned by the
+                // lifecycle system; the room only supplies spawn data and team metadata.
+                _ecsWorld = new ServerECSWorld(_collisionWorld, IsDeathmatch);
+                foreach (var bpId in _playerIds)
                 {
-                    var heroCfg = _playerHeroConfigs.TryGetValue(kvp.Key, out var hc) ? hc : null;
-                    _ecsWorld.RegisterPlayer(kvp.Key, kvp.Value, heroCfg);
+                    var player = Context.Players.Find(value => Context.GetBattlePlayerId(value.UserId) == bpId);
+                    var heroCfg = HeroRegistry.GetHero(player?.HeroId ?? HeroRegistry.DefaultHeroId)
+                        ?? HeroRegistry.GetHero(HeroRegistry.DefaultHeroId);
+                    var spawnPoint = initialSpawns[bpId];
+                    var spawnSnapshot = PlayerSnapshot.Default(spawnPoint.Position);
+                    spawnSnapshot.Rotation = Quat.Euler(0f, spawnPoint.Yaw, 0f);
+                    _ecsWorld.QueuePlayerSpawn(
+                        bpId,
+                        spawnSnapshot,
+                        heroCfg,
+                        player?.TeamId ?? 0);
                 }
+                _ecsWorld.FlushLifecycleRequests();
 
                 Log($"Battle {BattleId} initialized with {Context.Players.Count} players");
             }
+        }
+
+        private static void EnsureDefaultGround(CollisionWorld world)
+        {
+            if (world == null) return;
+            var min = new Vec3(-50, -1, -50);
+            var max = new Vec3(50, 0, 50);
+            const float epsilon = 0.001f;
+            for (int i = 0; i < world.Count; i++)
+            {
+                var box = world.Boxes[i];
+                if (Math.Abs(box.Min.x - min.x) <= epsilon
+                    && Math.Abs(box.Min.y - min.y) <= epsilon
+                    && Math.Abs(box.Min.z - min.z) <= epsilon
+                    && Math.Abs(box.Max.x - max.x) <= epsilon
+                    && Math.Abs(box.Max.y - max.y) <= epsilon
+                    && Math.Abs(box.Max.z - max.z) <= epsilon)
+                    return;
+            }
+            world.AddBox(new AABB(min, max));
         }
 
         /// <summary>
@@ -332,10 +336,10 @@ namespace ShootingGame.Server
         {
             lock (_lock)
             {
-                if (_disconnectedPlayers.Contains(battlePlayerId))
+                if (_ecsWorld.IsPlayerDisconnected(battlePlayerId))
                     return;
 
-                _playerReady[battlePlayerId] = true;
+                _ecsWorld.SetPlayerReady(battlePlayerId, true);
                 _playerEndpoints[battlePlayerId] = endpoint;
 
                 Log($"Player {battlePlayerId} ready in battle {BattleId}");
@@ -344,11 +348,11 @@ namespace ShootingGame.Server
                 SendBattleStart(battlePlayerId, endpoint);
 
                 // 全员就绪后启动帧循环
-                if (!_hasStarted && _playerReady.Values.Count >= Context.Players.Count)
+                if (!_hasStarted && _playerIds.Count >= Context.Players.Count)
                 {
                     bool allReady = true;
-                    foreach (var ready in _playerReady.Values)
-                        allReady = allReady && ready;
+                    foreach (var playerId in _playerIds)
+                        allReady = allReady && _ecsWorld.IsPlayerReady(playerId);
 
                     if (allReady)
                     {
@@ -387,7 +391,7 @@ namespace ShootingGame.Server
             {
                 if (!_hasStarted || _hasEnded)
                     return;
-                if (_disconnectedPlayers.Contains(battlePlayerId))
+                if (_ecsWorld.IsPlayerDisconnected(battlePlayerId))
                     return;
 
                 if (payload.Length < 12) return; // NetId(4) + MethodHash(8) 最小头部
@@ -422,33 +426,18 @@ namespace ShootingGame.Server
                 if (!_hasStarted || _hasEnded)
                     return;
 
-                if (_disconnectedPlayers.Contains(battlePlayerId))
+                if (_ecsWorld.IsPlayerDisconnected(battlePlayerId))
                     return;
 
-                if (_playerIsDead.GetValueOrDefault(battlePlayerId, false))
+                if (_ecsWorld.IsPlayerDead(battlePlayerId))
                     return;
 
                 // Update acked frame
-                if (_playerAckedFrame[battlePlayerId] < clientAckedFrame)
-                {
-                    _playerAckedFrame[battlePlayerId] = clientAckedFrame;
-                }
+                _ecsWorld.UpdateClientAckedFrame(battlePlayerId, clientAckedFrame);
 
                 // Store movement input (will be consumed in frame loop)
-                if (_inputBuffers.TryGetValue(battlePlayerId, out var inputBuffer))
+                if (_ecsWorld != null)
                 {
-                    // 跳跃按键边缘检测：防止长按跳跃键在落地后立刻重新起跳
-                    bool jumpEdge = operation.Jump;
-                    if (_prevJumpHeld.TryGetValue(battlePlayerId, out bool wasHeld) && wasHeld && operation.Jump)
-                    {
-                        jumpEdge = false; // 持续按住，不触发新跳跃
-                    }
-                    _prevJumpHeld[battlePlayerId] = operation.Jump;
-
-                    // 跳跃边沿 → 事件队列（ProcessFrame 应用，确保不丢）
-                    if (jumpEdge)
-                        _pendingJumps.Add(battlePlayerId);
-
                     var input = new InputFrame
                     {
                         Tick = clientFrameId,
@@ -456,34 +445,21 @@ namespace ShootingGame.Server
                         AimYaw = operation.AimYaw,
                         AimPitch = operation.AimPitch,
                         Fire = operation.Fire,
-                        Jump = jumpEdge,
+                        Jump = operation.Jump,
                         Run = operation.Run,
                         Aim = operation.Aim,
                         Reload = operation.Reload,
                         Crouch = operation.Crouch
                     };
-                    inputBuffer.Store(input);
+                    _ecsWorld.QueueInput(battlePlayerId, input);
 
                 }
 
 
 
-                // Process attacks (deduplication)
+                // Queue attacks for the ECS receive system; deduplication happens on the entity.
                 if (operation.AttackOperations != null && operation.AttackOperations.Count > 0)
-                {
-                    foreach (var atk in operation.AttackOperations)
-                    {
-                        // 去重：只接受比上次更新的 AttackId
-                        if (atk.AttackId > _lastProcessedAttackId[battlePlayerId])
-                        {
-                            _pendingAttacks[battlePlayerId].Add(atk);
-                            _lastProcessedAttackId[battlePlayerId] = atk.AttackId;
-                        }
-                        else
-                        {
-                        }
-                    }
-                }
+                    _ecsWorld.QueueAttacks(battlePlayerId, operation.AttackOperations);
 
                 // Process ability events (server-authoritative)
                 if (operation.AbilityEvents != null && operation.AbilityEvents.Count > 0)
@@ -497,7 +473,7 @@ namespace ShootingGame.Server
                                 _pendingAbilityConfirmations.Add(new AbilityEventData
                                 {
                                     PlayerId = (byte)battlePlayerId,
-                                    InstanceId = instanceId,
+                                    InstanceId = evt.InstanceId,
                                     AssetId = evt.AssetId,
                                     EventType = instanceId > 0 ? AbilityEventType.ConfirmActivate : AbilityEventType.RejectActivate
                                 });
@@ -526,19 +502,19 @@ namespace ShootingGame.Server
             int bpId = Context.GetBattlePlayerId(userId);
             if (bpId < 0) return;
 
+            bool shouldEndBattle = false;
+
             lock (_lock)
             {
                 // 玩家还没通过 UDP 连上战斗（BattleReady 未到）→ 不判负，等重连或清理
                 if (!_playerEndpoints.ContainsKey(bpId))
                 {
                     Log($"Player {bpId} (userId={userId}) disconnected BEFORE UDP battle join. Marking rejoin-pending.");
-                    _playerReady.Remove(bpId);
                     return;
                 }
 
-                _disconnectedPlayers.Add(bpId);
-                _playerReady.Remove(bpId);
-                _playerIsDead[bpId] = true;
+                _ecsWorld.QueuePlayerDisconnect(bpId);
+                _ecsWorld.FlushLifecycleRequests();
 
                 Log($"Player {bpId} (userId={userId}) disconnected");
 
@@ -547,12 +523,12 @@ namespace ShootingGame.Server
                 {
                     bool allDown = true;
                     bool anyJoined = false;
-                    foreach (var kvp in _playerSnapshots)
+                    foreach (var playerId in _playerIds)
                     {
-                        if (!_playerEndpoints.ContainsKey(kvp.Key))
+                        if (!_playerEndpoints.ContainsKey(playerId))
                             continue; // 还没连上 UDP，不算
                         anyJoined = true;
-                        if (!_disconnectedPlayers.Contains(kvp.Key) && !_playerIsDead.GetValueOrDefault(kvp.Key, false))
+                        if (!_ecsWorld.IsPlayerDisconnected(playerId) && !_ecsWorld.IsPlayerDead(playerId))
                         {
                             allDown = false;
                             break;
@@ -561,10 +537,15 @@ namespace ShootingGame.Server
                     if (allDown && anyJoined)
                     {
                         Log($"All players down, ending battle {BattleId}");
-                        EndBattle();
+                        shouldEndBattle = true;
                     }
                 }
             }
+
+            // MatchMaker may call this method while holding its own lock. EndBattle
+            // must run after releasing the room lock to keep lock ordering acyclic.
+            if (shouldEndBattle)
+                EndBattle();
         }
 
         private void BroadcastBattleStart()
@@ -595,6 +576,7 @@ namespace ShootingGame.Server
                 IsBackground = true,
                 Name = $"Battle_{BattleId}_FrameLoop"
             };
+            _frameThread = thread;
             thread.Start();
 
             Log($"Battle {BattleId} frame loop started");
@@ -605,72 +587,85 @@ namespace ShootingGame.Server
             var sw = Stopwatch.StartNew();
             long lastTick = sw.ElapsedMilliseconds;
             double accumulator = 0;
-
-            while (_isRunning)
+            try
             {
-                long now = sw.ElapsedMilliseconds;
-                long dt = now - lastTick;
-                lastTick = now;
-                accumulator += dt / 1000.0;
-
-                int stepCount = 0;
-                while (accumulator >= _frameInterval && stepCount < MaxCatchupFrames)
+                while (_isRunning)
                 {
-                    if (_gameOverRetransmitRemaining > 0)
-                    {
-                        // GameOver retransmission phase: re-send GameOver to all players
-                        lock (_lock)
-                        {
-                            foreach (var kvp in _playerEndpoints)
-                            {
-                                SendGameOver(kvp.Value);
-                            }
-                            _gameOverRetransmitRemaining--;
+                    long now = sw.ElapsedMilliseconds;
+                    long dt = now - lastTick;
+                    lastTick = now;
+                    accumulator += dt / 1000.0;
 
-                            if (_gameOverRetransmitRemaining <= 0)
-                            {
-                                _isRunning = false;
-                                _frameHistory.Clear();
-                            }
-                        }
-                    }
-                    else
+                    int stepCount = 0;
+                    while (accumulator >= _frameInterval && stepCount < MaxCatchupFrames)
                     {
-                        bool shouldEnd = false;
-                        lock (_lock)
+                        if (_gameOverRetransmitRemaining > 0)
                         {
-                            if (IsDeathmatch ? CheckDeathmatchEnd() : IsTeamEliminated())
+                            // GameOver retransmission phase: re-send GameOver to all players
+                            lock (_lock)
                             {
-                                shouldEnd = true;
-                            }
-                            else
-                            {
-                                try
+                                foreach (var kvp in _playerEndpoints)
                                 {
-                                    ProcessFrame();
-                                    _frameId++;
+                                    SendGameOver(kvp.Value);
                                 }
-                                catch (Exception ex)
+                                _gameOverRetransmitRemaining--;
+
+                                if (_gameOverRetransmitRemaining <= 0)
                                 {
-                                    Console.WriteLine($"[BattleRoom] ProcessFrame ERROR: {ex.Message}\n{ex.StackTrace}");
+                                    _isRunning = false;
+                                    _frameHistory.Clear();
+                                    _ecsWorld?.Clear();
                                 }
                             }
                         }
-
-                        if (shouldEnd)
+                        else
                         {
-                            EndBattle();
+                            bool shouldEnd = false;
+                            lock (_lock)
+                            {
+                                if (IsDeathmatch ? CheckDeathmatchEnd() : IsTeamEliminated())
+                                {
+                                    shouldEnd = true;
+                                }
+                                else
+                                {
+                                    try
+                                    {
+                                        ProcessFrame();
+                                        _frameId++;
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"[BattleRoom] ProcessFrame ERROR: {ex.Message}\n{ex.StackTrace}");
+                                    }
+                                }
+                            }
+
+                            if (shouldEnd)
+                            {
+                                EndBattle();
+                            }
                         }
+
+                        accumulator -= _frameInterval;
+                        stepCount++;
                     }
 
-                    accumulator -= _frameInterval;
-                    stepCount++;
+                    Thread.Sleep(1);
                 }
-
-                Thread.Sleep(1);
             }
-
-            sw.Stop();
+            finally
+            {
+                sw.Stop();
+                lock (_lock)
+                {
+                    if (_frameThread == Thread.CurrentThread)
+                    {
+                        _frameThread = null;
+                        _ecsWorld?.Clear();
+                    }
+                }
+            }
         }
 
         private void ProcessFrame()
@@ -680,34 +675,29 @@ namespace ShootingGame.Server
                 FrameId = _frameId
             };
 
-            // 0. Process respawns
-            ProcessRespawns();
-
             // 0.5. 连发扩散热度衰减
             DecayBloomHeat();
 
-            // 1. Process inputs and update positions
-            foreach (var kvp in _playerSnapshots)
+            // Network input is applied by ServerNetworkReceiveSystem on the World thread.
+            _ecsWorld.Tick();
+            _damageEvents.Clear();
+            _ecsWorld.ConsumeDamageEvents(_damageEvents);
+            AppendDamageEvents();
+            _snapshotMessages.Clear();
+            _ecsWorld.ConsumeSnapshots(_snapshotMessages);
+            var respawnedPlayers = new List<int>();
+            _ecsWorld.ConsumeRespawnRequests(respawnedPlayers);
+            foreach (var bpId in respawnedPlayers)
+                RespawnPlayer(bpId);
+
+            // Build the legacy protocol operation from the ECS input that drove this tick.
+            foreach (var bpId in _playerIds)
             {
-                int bpId = kvp.Key;
-                if (_disconnectedPlayers.Contains(bpId) || _playerIsDead[bpId])
+                if (_ecsWorld.IsPlayerDisconnected(bpId) || _ecsWorld.IsPlayerDead(bpId))
                     continue;
 
-                var snapshot = kvp.Value;
-                var inputBuffer = _inputBuffers[bpId];
-                var input = inputBuffer.ConsumeNext();
+                var input = _ecsWorld.GetCurrentInput(bpId);
 
-                // 应用跳跃边沿事件（事件驱动，不依赖输入消费时序）
-                if (_pendingJumps.Contains(bpId))
-                {
-                    input.Jump = true;
-                    _pendingJumps.Remove(bpId);
-                }
-
-                _playerIsAiming[bpId] = input.Aim;
-                _playerIsCrouching[bpId] = input.Crouch;
-
-                // Update from input
                 var op = new PlayerOperation
                 {
                     PlayerId = bpId,
@@ -722,41 +712,22 @@ namespace ShootingGame.Server
                     Reload = input.Reload
                 };
 
-                // === 服务器权威模拟（用共享 PlayerSystemGroup，双端一致）===
-                var entity = _ecsWorld.GetEntity(bpId);
-                if (entity.IsValid && _ecsWorld.EntityManager.IsValid(entity))
-                {
-                    _ecsWorld.TickPlayer(bpId, entity, input, _frameInterval);
-                    snapshot = _ecsWorld.GetSnapshot(bpId, _frameId);
-                }
-                else
-                {
-                    snapshot = PlayerSimulation.Simulate(snapshot, input, _frameInterval, _collisionWorld);
-                }
-                _playerSnapshots[bpId] = snapshot;
-
-                RecordPosition(bpId, snapshot.Position);
-
-                // Merge pending attacks
-                if (_pendingAttacks.TryGetValue(bpId, out var attacks) && attacks.Count > 0)
-                {
-                    op.AttackOperations.AddRange(attacks);
-                }
+                _ecsWorld.ConsumeAttackOperations(bpId, op.AttackOperations);
 
                 frameOp.Operations.Add(op);
             }
 
-            // 2. Clear pending attacks (will be processed)
-            foreach (var attacks in _pendingAttacks.Values)
+            foreach (var bpId in _playerIds)
             {
-                attacks.Clear();
+                var entity = _ecsWorld.GetEntity(bpId);
+                if (!entity.IsValid || !_ecsWorld.EntityManager.IsValid(entity))
+                    continue;
+
+                if (!_ecsWorld.TryBuildCurrentSnapshot(bpId, _frameId, out var snapshot))
+                    continue;
+                snapshot.Tick = _frameId;
+                _ecsWorld.RecordPlayerPosition(bpId, _frameId, snapshot.Position);
             }
-
-            // 3. Spawn bullets from attacks
-            SpawnBullets(frameOp);
-
-            // 4. Tick bullets and collect hits
-            TickBullets();
 
             // 5. Pack player states
             PackPlayerStates(frameOp);
@@ -786,83 +757,93 @@ namespace ShootingGame.Server
             BroadcastFrame(frameOp);
         }
 
-        /// <summary>
-        /// 伤害后同步到快照 + ECS HealthComponent，防止 GetSnapshot 每帧从 ECS 读回初始 HP。
-        /// </summary>
-        private void ApplyDamageToSnapshotAndECS(int targetId, int hp)
+        private void AppendDamageEvents()
         {
-            if (_playerSnapshots.TryGetValue(targetId, out var targetSnap))
+            for (int i = 0; i < _damageEvents.Count; i++)
             {
-                targetSnap.Health = (byte)hp;
-                _playerSnapshots[targetId] = targetSnap;
-            }
-            var e = _ecsWorld.GetEntity(targetId);
-            if (e.IsValid && _ecsWorld.EntityManager.IsValid(e) &&
-                _ecsWorld.EntityManager.TryGetComponent<HealthComponent>(e, out var hc))
-            {
-                hc.Current = (byte)hp;
-                hc.Max = (byte)Math.Max(hc.Max, hp);
-                _ecsWorld.EntityManager.SetComponent(e, hc);
+                var applied = _damageEvents[i];
+                var detected = applied.Hit;
+                if (applied.IsKill)
+                {
+                    _killerPlayerId = detected.AttackerId;
+                    _killerTeamId = _ecsWorld.GetPlayerTeam(detected.AttackerId);
+                    HandleDeathmatchDeath(detected.VictimId);
+                    int lives = DeathmatchRules.GetRemainingLives(_ecsWorld.GetPlayerScore(detected.VictimId).Deaths);
+                    Log($"Player {detected.VictimId} killed by {detected.AttackerId} (K:{_ecsWorld.GetPlayerScore(detected.AttackerId).Kills}, lives:{lives})");
+                }
+
+                _pendingHitEvents.Add(new HitEventMsg
+                {
+                    AttackId = detected.AttackId,
+                    AttackerId = detected.AttackerId,
+                    VictimId = detected.VictimId,
+                    Damage = applied.Damage,
+                    IsKill = applied.IsKill,
+                    HitPoint = detected.HitPoint,
+                    HitFrameId = detected.HitFrameId,
+                    BodyPart = detected.BodyPart
+                });
             }
         }
 
-        private void RecordPosition(int bpId, Vec3 pos)
+        private bool ApplyPlayerDamage(int attackerId, int attackerTeamId, int targetId, int damage)
         {
-            if (!_positionHistory.ContainsKey(bpId))
-                _positionHistory[bpId] = new Dictionary<int, Vec3>();
+            var result = _ecsWorld.ApplyCombatDamage(attackerId, targetId, damage, GameConstants.RespawnDelay);
+            if (!result.WasApplied)
+                return false;
 
-            _positionHistory[bpId][_frameId] = pos;
-
-            // Clean old history
-            while (_positionHistoryFrames.Count > PositionHistorySize)
+            if (result.IsKill)
             {
-                int oldest = _positionHistoryFrames[0];
-                _positionHistoryFrames.RemoveAt(0);
-                foreach (var history in _positionHistory.Values)
-                {
-                    history.Remove(oldest);
-                }
+                _killerPlayerId = attackerId;
+                _killerTeamId = attackerTeamId;
+                HandleDeathmatchDeath(targetId);
+                var attackerScore = _ecsWorld.GetPlayerScore(attackerId);
+                int lives = DeathmatchRules.GetRemainingLives(_ecsWorld.GetPlayerScore(targetId).Deaths);
+                Log($"Player {targetId} killed by {attackerId} (K:{attackerScore.Kills}, lives:{lives})");
             }
 
-            if (!_positionHistoryFrames.Contains(_frameId))
-                _positionHistoryFrames.Add(_frameId);
+            return result.IsKill;
+        }
+
+        private void HandleDeathmatchDeath(int victimId)
+        {
+            if (!IsDeathmatch)
+                return;
+
+            int deaths = _ecsWorld.GetPlayerScore(victimId).Deaths;
+            if (!DeathmatchRules.ShouldRespawn(deaths))
+            {
+                _ecsWorld.EliminatePlayer(victimId);
+                Log($"Player {victimId} exhausted all {DeathmatchRules.LivesPerPlayer} lives and was eliminated");
+            }
         }
 
         private Vec3 GetHistoricalPosition(int bpId, int frameId)
         {
-            if (_positionHistory.TryGetValue(bpId, out var history) &&
-                history.TryGetValue(frameId, out var pos))
-            {
+            if (_ecsWorld.TryGetHistoricalPosition(bpId, frameId, out var pos))
                 return pos;
-            }
-            return _playerSnapshots.TryGetValue(bpId, out var snap) ? snap.Position : Vec3.Zero;
-        }
 
-        /// <summary>把枪械参数注入玩家快照（弹药/换弹/射速）。</summary>
-        private static void ApplyGunToSnapshot(ref PlayerSnapshot snap, GunConfigData gun)
-        {
-            if (gun == null) return;
-            snap.MaxAmmo = gun.ClipSize;
-            snap.CurrentAmmo = gun.ClipSize;
-            snap.ReloadDuration = gun.ReloadTime;
-            snap.FireInterval = gun.FireRate;
+            return _ecsWorld.TryGetSnapshot(bpId, _frameId, out var snap) ? snap.Position : Vec3.Zero;
         }
 
         private GunConfigData GetPlayerGun(int bpId)
         {
-            return _playerGuns.TryGetValue(bpId, out var gun) ? gun : GunRegistry.GetGun(null);
+            return _ecsWorld.GetPlayerGun(bpId);
         }
 
         /// <summary>连发扩散热度随时间恢复</summary>
         private void DecayBloomHeat()
         {
-            foreach (var kvp in _playerGuns)
+            foreach (var bpId in _playerIds)
             {
-                var gun = kvp.Value;
+                var gun = GetPlayerGun(bpId);
                 if (gun == null || gun.BloomRecover <= 0f) continue;
-                float heat = _bloomHeat.GetValueOrDefault(kvp.Key);
-                if (heat > 0f)
-                    _bloomHeat[kvp.Key] = Math.Max(0f, heat - gun.BloomRecover * _frameInterval);
+                if (!_ecsWorld.TryGetWeaponRuntime(bpId, out var runtime)
+                    || runtime.BloomHeat <= 0f)
+                    continue;
+
+                runtime.BloomHeat = Math.Max(0f, runtime.BloomHeat - gun.BloomRecover * _frameInterval);
+                _ecsWorld.SetWeaponRuntime(bpId, runtime);
             }
         }
 
@@ -874,14 +855,14 @@ namespace ShootingGame.Server
                     continue;
 
                 int bpId = op.PlayerId;
-                if (!_playerSnapshots.TryGetValue(bpId, out var snapshot))
+                if (!_ecsWorld.TryGetSnapshot(bpId, _frameId, out var snapshot))
                     continue;
 
                 // 服务端权威弹药检查：换弹中或弹药不足时忽略攻击
                 if (snapshot.IsReloading || snapshot.CurrentAmmo <= 0)
                     continue;
 
-                int teamId = _playerTeams.GetValueOrDefault(bpId, 0);
+                int teamId = _ecsWorld.GetPlayerTeam(bpId);
                 var gun = GetPlayerGun(bpId);
                 float bulletSpeed = gun != null ? gun.BulletSpeed : 100f;
                 float maxRange = gun != null ? gun.Range : 200f;
@@ -896,16 +877,18 @@ namespace ShootingGame.Server
 
                     // 服务端射速校验（用原始客户端帧号，不受 _frameId 截断影响；
                     // 否则服务器 tick 慢于客户端时两次攻击被截成同一帧，差=0→永远拒绝）
-                    if (gun != null && _lastFireFrame.TryGetValue(bpId, out int lastFire))
+                    _ecsWorld.TryGetWeaponRuntime(bpId, out var weaponRuntime);
+                    if (gun != null && weaponRuntime.HasLastFireFrame)
                     {
-                        float interval = (originalClientFrame - lastFire) * _frameInterval;
+                        float interval = (originalClientFrame - weaponRuntime.LastFireFrame) * _frameInterval;
                         if (interval < gun.FireRate * 0.5f)
                         {
                             Log($"[AntiCheat] bp{bpId} 射速过快: {interval:F3}s < {gun.FireRate * 0.5f:F3}s, 丢弃攻击");
                             continue;
                         }
                     }
-                    _lastFireFrame[bpId] = originalClientFrame;
+                    weaponRuntime.HasLastFireFrame = true;
+                    weaponRuntime.LastFireFrame = originalClientFrame;
 
                     // 优先使用客户端发送的枪口位置（非零表示客户端已设置）
                     Vec3 spawnPos;
@@ -933,11 +916,14 @@ namespace ShootingGame.Server
                     if (gun != null)
                     {
                         bool isMoving = new Vec3(snapshot.Velocity.x, 0f, snapshot.Velocity.z).SqrMagnitude > 1f;
-                        float heat = _bloomHeat.GetValueOrDefault(bpId);
+                        float heat = weaponRuntime.BloomHeat;
                         float spreadDeg = SpreadUtility.ComputeTotalSpread(gun, isMoving, heat);
                         dir = SpreadUtility.ApplyConeSpread(dir, spreadDeg, SpreadUtility.MakeSeed(atk.AttackId, bpId));
-                        _bloomHeat[bpId] = Math.Min(heat + gun.BloomPerShot, gun.BloomMax > 0f ? gun.BloomMax : heat + gun.BloomPerShot);
+                        weaponRuntime.BloomHeat = Math.Min(heat + gun.BloomPerShot,
+                            gun.BloomMax > 0f ? gun.BloomMax : heat + gun.BloomPerShot);
                     }
+
+                    _ecsWorld.SetWeaponRuntime(bpId, weaponRuntime);
 
                     // Lag compensation: frame-by-frame catchup with collision detection
                     int catchupFrames = _frameId - clientFrame;
@@ -972,24 +958,21 @@ namespace ShootingGame.Server
                             break;
 
                         // Check swept collision during catchup
-                        foreach (var targetKvp in _playerSnapshots)
+                        foreach (var targetId in _playerIds)
                         {
-                            int targetId = targetKvp.Key;
-                            if (targetId == bpId) continue;
-                            if (!IsDeathmatch && _playerTeams.TryGetValue(targetId, out int targetTeam) && targetTeam == teamId) continue;
-                            if (_playerIsDead.GetValueOrDefault(targetId, false)) continue;
-                            if (_disconnectedPlayers.Contains(targetId)) continue;
+                            if (!_ecsWorld.CanReceiveCombatDamage(bpId, targetId, IsDeathmatch))
+                                continue;
 
                             // Use the target's position at the corresponding catchup frame
                             Vec3 targetPos;
                             if (framesSimulated < catchupFrames)
                             {
                                 int historyFrame = clientFrame + framesSimulated;
-                                targetPos = GetHistoricalPosition(targetId, historyFrame);
+                                targetPos = _ecsWorld.GetCombatTargetPosition(targetId, historyFrame, _frameId);
                             }
                             else
                             {
-                                targetPos = targetKvp.Value.Position;
+                                targetPos = _ecsWorld.GetCombatTargetPosition(targetId, _frameId, _frameId);
                             }
 
                             // 商用级扫描碰撞：子弹路径(prevPos→currentPos) vs 命中胶囊体
@@ -1002,23 +985,7 @@ namespace ShootingGame.Server
                                     : GameConstants.HitscanDamage;
                                 int damage = CalculateBodyPartDamage(baseDamage, currentPos, targetPos, out int bodyPart);
                                 damage = ApplyTagDamageModifiers(damage, bpId, targetId);
-                                int hp = _playerHp[targetId] - damage;
-                                hp = Math.Max(0, hp);
-                                _playerHp[targetId] = hp;
-                                // 同步到快照 + ECS（否则 GetSnapshot 每帧从 ECS 读回初始值，HP 反复回满）
-                                ApplyDamageToSnapshotAndECS(targetId, hp);
-
-                                bool isKill = hp <= 0;
-                                if (isKill)
-                                {
-                                    _playerIsDead[targetId] = true;
-                                    _respawnTimers[targetId] = GameConstants.RespawnDelay;
-                                    _killerPlayerId = bpId;
-                                    _killerTeamId = teamId;
-                                    _kills[bpId] = _kills.GetValueOrDefault(bpId) + 1;
-                                    _deaths[targetId] = _deaths.GetValueOrDefault(targetId) + 1;
-                                    Log($"Player {targetId} killed by {bpId} (K:{_kills[bpId]}). Respawning in {GameConstants.RespawnDelay}s");
-                                }
+                                bool isKill = ApplyPlayerDamage(bpId, teamId, targetId, damage);
 
                                 _pendingHitEvents.Add(new HitEventMsg
                                 {
@@ -1044,7 +1011,7 @@ namespace ShootingGame.Server
 
                     if (!hitDuringCatchup && traveledDistance < maxRange)
                     {
-                        var bullet = new ServerBullet
+                        _ecsWorld.SpawnProjectile(new ProjectileComponent
                         {
                             AttackId = atk.AttackId,
                             OwnerId = bpId,
@@ -1057,9 +1024,7 @@ namespace ShootingGame.Server
                             Gun = gun,
                             SpawnFrameId = clientFrame,
                             TraveledDistance = traveledDistance
-                        };
-
-                        _activeBullets.Add(bullet);
+                        });
                     }
                 }
             }
@@ -1067,10 +1032,16 @@ namespace ShootingGame.Server
 
         private void TickBullets()
         {
-            var toRemove = new List<ServerBullet>();
+            var bullets = new List<Entity>();
+            var toRemove = new List<Entity>();
+            _ecsWorld.GetProjectileEntities(bullets);
 
-            foreach (var bullet in _activeBullets)
+            foreach (var bulletEntity in bullets)
             {
+                if (!_ecsWorld.EntityManager.IsValid(bulletEntity))
+                    continue;
+
+                ref var bullet = ref _ecsWorld.EntityManager.GetComponent<ProjectileComponent>(bulletEntity);
                 // 保存移动前位置，用于扫描碰撞检测
                 Vec3 prevPos = bullet.Position;
 
@@ -1081,7 +1052,7 @@ namespace ShootingGame.Server
                 // Check max distance
                 if (bullet.TraveledDistance >= bullet.MaxDistance)
                 {
-                    toRemove.Add(bullet);
+                    toRemove.Add(bulletEntity);
                     continue;
                 }
 
@@ -1090,28 +1061,18 @@ namespace ShootingGame.Server
                 var worldHit = _collisionWorld.SweepSphere(prevPos, GameConstants.BulletRadius, bullet.Direction, moveDist);
                 if (worldHit.Hit)
                 {
-                    toRemove.Add(bullet);
+                    toRemove.Add(bulletEntity);
                     continue;
                 }
 
                 // Check swept collision with players
-                foreach (var kvp in _playerSnapshots)
+                foreach (var targetId in _playerIds)
                 {
-                    int targetId = kvp.Key;
-                    var targetPos = kvp.Value.Position;
-
-                    // Skip self and teammates (FFA 无队友，只跳过自己)
-                    if (targetId == bullet.OwnerId)
-                        continue;
-                    if (!IsDeathmatch && _playerTeams.TryGetValue(targetId, out int targetTeam) &&
-                        targetTeam == bullet.OwnerTeamId)
+                    if (!_ecsWorld.CanReceiveCombatDamage(bullet.OwnerId, targetId, IsDeathmatch))
                         continue;
 
-                    // Skip dead/disconnected
-                    if (_playerIsDead.GetValueOrDefault(targetId, false))
-                        continue;
-                    if (_disconnectedPlayers.Contains(targetId))
-                        continue;
+                    var targetPos = _ecsWorld.GetSnapshot(targetId, _frameId).Position;
+                    targetPos = _ecsWorld.GetCombatTargetPosition(targetId, _frameId, _frameId);
 
                     // 商用级扫描碰撞：子弹路径(prevPos→newPos) vs 命中胶囊体
                     // 使用比物理碰撞更宽松的 HitCapsuleRadius，且扫描整段路径防止穿透
@@ -1124,23 +1085,11 @@ namespace ShootingGame.Server
                             : bullet.Damage;
                         int damage = CalculateBodyPartDamage(bulletBaseDamage, bullet.Position, targetPos, out int bodyPart);
                         damage = ApplyTagDamageModifiers(damage, bullet.OwnerId, targetId);
-                        int hp = _playerHp[targetId] - damage;
-                        hp = Math.Max(0, hp);
-                        _playerHp[targetId] = hp;
-                        // 同步到快照 + ECS
-                        ApplyDamageToSnapshotAndECS(targetId, hp);
-
-                        bool isKill = hp <= 0;
-                        if (isKill)
-                        {
-                            _playerIsDead[targetId] = true;
-                            _respawnTimers[targetId] = GameConstants.RespawnDelay;
-                            _killerPlayerId = bullet.OwnerId;
-                            _killerTeamId = bullet.OwnerTeamId;
-                            _kills[bullet.OwnerId] = _kills.GetValueOrDefault(bullet.OwnerId) + 1;
-                            _deaths[targetId] = _deaths.GetValueOrDefault(targetId) + 1;
-                            Log($"Player {targetId} killed by {bullet.OwnerId} (K:{_kills[bullet.OwnerId]}). Respawning in {GameConstants.RespawnDelay}s");
-                        }
+                        bool isKill = ApplyPlayerDamage(
+                            bullet.OwnerId,
+                            bullet.OwnerTeamId,
+                            targetId,
+                            damage);
 
                         var hitEvent = new HitEventMsg
                         {
@@ -1155,68 +1104,42 @@ namespace ShootingGame.Server
                         };
 
                         _pendingHitEvents.Add(hitEvent);
-                        toRemove.Add(bullet);
+                        toRemove.Add(bulletEntity);
                         Log($"[Hit] bp{bullet.OwnerId} hit bp{targetId} for {damage} damage (kill={isKill})");
                         break;
                     }
                 }
             }
 
-            foreach (var b in toRemove)
-                _activeBullets.Remove(b);
-        }
-
-        private void ProcessRespawns()
-        {
-            var respawnedPlayers = new List<int>();
-            foreach (var kvp in _respawnTimers)
-            {
-                int bpId = kvp.Key;
-                if (!_playerIsDead.GetValueOrDefault(bpId, false))
-                    continue;
-
-                float remaining = kvp.Value - _frameInterval;
-                if (remaining <= 0)
-                {
-                    RespawnPlayer(bpId);
-                    respawnedPlayers.Add(bpId);
-                }
-                else
-                {
-                    _respawnTimers[bpId] = remaining;
-                }
-            }
-
-            foreach (var bpId in respawnedPlayers)
-                _respawnTimers.Remove(bpId);
+            foreach (var bulletEntity in toRemove)
+                _ecsWorld.DestroyProjectile(bulletEntity);
         }
 
         private void RespawnPlayer(int bpId)
         {
-            int teamId = _playerTeams.GetValueOrDefault(bpId, 0);
-            Vec3 spawnPos = GetRespawnPosition(bpId, teamId);
-            int maxHp = _playerHeroConfigs.TryGetValue(bpId, out var hc) ? hc.MaxHP : GameConstants.MaxHealth;
+            if (IsDeathmatch && !DeathmatchRules.ShouldRespawn(_ecsWorld.GetPlayerScore(bpId).Deaths))
+            {
+                _ecsWorld.EliminatePlayer(bpId);
+                return;
+            }
 
-            _playerIsDead[bpId] = false;
-            _playerHp[bpId] = maxHp;
-            _playerSnapshots[bpId] = PlayerSnapshot.Default(spawnPos);
+            int teamId = _ecsWorld.GetPlayerTeam(bpId);
+            SpawnPoint spawnPoint = GetRespawnPoint(bpId, teamId);
+            int maxHp = _ecsWorld.GetPlayerMaxHealth(bpId);
 
-            // Re-register ECS entity
-            var snap = _playerSnapshots[bpId];
-            ApplyGunToSnapshot(ref snap, _playerGuns.GetValueOrDefault(bpId));
-            _playerSnapshots[bpId] = snap;
-            var heroConfig = _playerHeroConfigs.GetValueOrDefault(bpId);
-            _ecsWorld.RegisterPlayer(bpId, snap, heroConfig);
+            var snap = PlayerSnapshot.Default(spawnPoint.Position);
+            snap.Rotation = Quat.Euler(0f, spawnPoint.Yaw, 0f);
+            _ecsWorld.ApplyPlayerLoadoutToSnapshot(bpId, ref snap);
+            snap.Health = (byte)Math.Max(0, Math.Min(byte.MaxValue, maxHp));
+            _ecsWorld.CompleteRespawn(bpId, snap);
 
-            _spawnPositions[bpId] = spawnPos;
-            Log($"Player {bpId} respawned at ({spawnPos.x:F1}, {spawnPos.y:F1}, {spawnPos.z:F1})");
+            Log($"Player {bpId} respawned at ({spawnPoint.Position.x:F1}, {spawnPoint.Position.y:F1}, {spawnPoint.Position.z:F1}) yaw={spawnPoint.Yaw:F1}");
         }
 
-        private Vec3 GetRespawnPosition(int bpId, int teamId)
+        private SpawnPoint GetRespawnPoint(int bpId, int teamId)
         {
-            // FFA：从 any 池随机选点，避免固定重生点被蹲
-            if (IsDeathmatch && _anySpawnPoints.Count > 0)
-                return _anySpawnPoints[_spawnRng.Next(_anySpawnPoints.Count)].Position;
+            if (IsDeathmatch)
+                return GetDeathmatchSpawnPoint(bpId);
 
             var pool = teamId == 1 ? _team1SpawnPoints :
                        teamId == 2 ? _team2SpawnPoints :
@@ -1228,44 +1151,107 @@ namespace ShootingGame.Server
             if (pool != null && pool.Count > 0)
             {
                 var sp = pool[_spawnRng.Next(pool.Count)];
-                return sp.Position;
+                return sp;
             }
 
-            return bpId < DefaultSpawnPositions.Length
+            return GetFallbackSpawnPoint(bpId);
+        }
+
+        private SpawnPoint GetInitialDeathmatchSpawnPoint(int bpId, int playerOrdinal)
+        {
+            if (_deathmatchSpawnPoints.Count == 0)
+                return GetFallbackSpawnPoint(bpId);
+
+            int index = playerOrdinal % _deathmatchSpawnPoints.Count;
+            _lastDeathmatchSpawnIndex[bpId] = index;
+            return _deathmatchSpawnPoints[index];
+        }
+
+        private SpawnPoint GetDeathmatchSpawnPoint(int bpId)
+        {
+            if (_deathmatchSpawnPoints.Count == 0)
+                return GetFallbackSpawnPoint(bpId);
+
+            var enemyPositions = new List<Vec3>();
+            foreach (var otherPlayerId in _playerIds)
+            {
+                if (otherPlayerId == bpId
+                    || _ecsWorld.IsPlayerDisconnected(otherPlayerId)
+                    || _ecsWorld.IsPlayerDead(otherPlayerId))
+                    continue;
+
+                if (_ecsWorld.TryBuildCurrentSnapshot(otherPlayerId, _frameId, out var snapshot))
+                    enemyPositions.Add(snapshot.Position);
+            }
+
+            int previousIndex = _lastDeathmatchSpawnIndex.TryGetValue(bpId, out int index) ? index : -1;
+            var selected = DeathmatchSpawnSelector.Select(
+                _deathmatchSpawnPoints,
+                enemyPositions,
+                previousIndex,
+                IsSpawnPointValid);
+            _lastDeathmatchSpawnIndex[bpId] = selected.Index;
+            return selected.SpawnPoint;
+        }
+
+        private bool IsSpawnPointValid(SpawnPoint spawnPoint)
+        {
+            // Lift the capsule slightly so standing on the floor is not treated as overlap.
+            var position = spawnPoint.Position + new Vec3(0f, 0.05f, 0f);
+            return !_collisionWorld.OverlapCapsule(Capsule.Player(position));
+        }
+
+        private static SpawnPoint GetFallbackSpawnPoint(int bpId)
+        {
+            Vec3 position = bpId >= 0 && bpId < DefaultSpawnPositions.Length
                 ? DefaultSpawnPositions[bpId]
                 : new Vec3(bpId * 2, 0, 0);
+            return new SpawnPoint(position);
         }
 
         /// <summary>
-        /// 死斗结束判定：任一玩家达到击杀目标，或对局时间耗尽。
-        /// 时间耗尽时击杀最多者胜（平手比死亡少、再比 bpId 小）。
+        /// 死斗结束判定：仅剩一名仍有生命的玩家，或对局时间耗尽。
+        /// 时间耗尽时剩余生命最多者胜，再比较击杀、死亡和 bpId。
         /// </summary>
         private bool CheckDeathmatchEnd()
         {
-            _matchElapsed += _frameInterval;
-
-            foreach (var kvp in _kills)
+            bool hasUnavailablePlayer = false;
+            var playerStates = new List<DeathmatchPlayerState>();
+            foreach (var bpId in _playerIds)
             {
-                if (kvp.Value >= Context.KillTarget)
-                {
-                    _killerPlayerId = kvp.Key;
-                    return true;
-                }
+                var score = _ecsWorld.GetPlayerScore(bpId);
+                bool isDisconnected = _ecsWorld.IsPlayerDisconnected(bpId);
+                hasUnavailablePlayer = hasUnavailablePlayer
+                    || isDisconnected
+                    || DeathmatchRules.GetRemainingLives(score.Deaths) == 0;
+                playerStates.Add(new DeathmatchPlayerState(bpId, score.Deaths, isDisconnected));
             }
 
-            if (_matchElapsed >= Context.TimeLimit)
+            if (hasUnavailablePlayer && DeathmatchRules.TryGetLastSurvivor(playerStates, out int survivor))
             {
-                int bestBp = -1, bestKills = -1, bestDeaths = int.MaxValue;
-                foreach (var kvp in _kills)
+                _killerPlayerId = survivor;
+                return true;
+            }
+
+            if (ServerMatchClock.GetRemainingTicks(_frameId, Context.TimeLimit, _frameInterval) <= 0)
+            {
+                int bestBp = -1, bestLives = -1, bestKills = -1, bestDeaths = int.MaxValue;
+                foreach (var bpId in _playerIds)
                 {
-                    int d = _deaths.GetValueOrDefault(kvp.Key);
-                    if (kvp.Value > bestKills ||
-                        (kvp.Value == bestKills && d < bestDeaths) ||
-                        (kvp.Value == bestKills && d == bestDeaths && kvp.Key < bestBp))
+                    if (_ecsWorld.IsPlayerDisconnected(bpId))
+                        continue;
+
+                    var score = _ecsWorld.GetPlayerScore(bpId);
+                    int lives = DeathmatchRules.GetRemainingLives(score.Deaths);
+                    if (lives > bestLives
+                        || (lives == bestLives && score.Kills > bestKills)
+                        || (lives == bestLives && score.Kills == bestKills && score.Deaths < bestDeaths)
+                        || (lives == bestLives && score.Kills == bestKills && score.Deaths == bestDeaths && (bestBp < 0 || bpId < bestBp)))
                     {
-                        bestBp = kvp.Key;
-                        bestKills = kvp.Value;
-                        bestDeaths = d;
+                        bestBp = bpId;
+                        bestLives = lives;
+                        bestKills = score.Kills;
+                        bestDeaths = score.Deaths;
                     }
                 }
                 _killerPlayerId = bestBp;
@@ -1278,23 +1264,34 @@ namespace ShootingGame.Server
         private bool IsTeamEliminated()
         {
             // 还有玩家未通过 UDP 加入（BattleReady 未到）且未断开 → 不判定胜负（可能在加载场景）
-            foreach (var bpId in _playerTeams.Keys)
+            foreach (var bpId in _playerIds)
             {
-                if (!_playerEndpoints.ContainsKey(bpId) && !_disconnectedPlayers.Contains(bpId))
+                if (!_playerEndpoints.ContainsKey(bpId) && !_ecsWorld.IsPlayerDisconnected(bpId))
                     return false;
             }
 
-            bool team1Alive = false, team2Alive = false;
-            foreach (var kvp in _playerTeams)
+            if (ServerMatchClock.GetRemainingTicks(_frameId, Context.TimeLimit, _frameInterval) <= 0)
             {
-                int bpId = kvp.Key;
-                if (_disconnectedPlayers.Contains(bpId))
+                ServerMatchClock.ResolveTeamTimeLimitWinner(
+                    _frameHistory,
+                    _frameId,
+                    Context,
+                    out _killerPlayerId,
+                    out _killerTeamId);
+                return true;
+            }
+
+            bool team1Alive = false, team2Alive = false;
+            foreach (var bpId in _playerIds)
+            {
+                if (_ecsWorld.IsPlayerDisconnected(bpId))
                     continue;
-                if (_playerIsDead.GetValueOrDefault(bpId, false))
+                if (_ecsWorld.IsPlayerDead(bpId))
                     continue;
 
-                if (kvp.Value == 1) team1Alive = true;
-                else if (kvp.Value == 2) team2Alive = true;
+                int teamId = _ecsWorld.GetPlayerTeam(bpId);
+                if (teamId == 1) team1Alive = true;
+                else if (teamId == 2) team2Alive = true;
             }
 
             if (!team1Alive && !team2Alive) return false; // no players at all
@@ -1305,10 +1302,11 @@ namespace ShootingGame.Server
 
         private void PackPlayerStates(AllPlayerOperation frameOp)
         {
-            foreach (var kvp in _playerSnapshots)
+            foreach (var bpId in _playerIds)
             {
-                int bpId = kvp.Key;
-                var snap = kvp.Value;
+                if (!_ecsWorld.TryBuildCurrentSnapshot(bpId, _frameId, out var snap))
+                    continue;
+                snap.Tick = _frameId;
 
                 float rotationY = snap.Rotation.EulerAngles.y;
                 float speed = snap.Velocity.Magnitude;
@@ -1320,10 +1318,12 @@ namespace ShootingGame.Server
                 if (snap.ActiveAbilities != null && snap.ActiveAbilityCount > 0)
                 {
                     activeAbilities = new List<AbilityInstanceData>();
-                    for (int i = 0; i < snap.ActiveAbilityCount; i++)
+                    int count = Math.Min(snap.ActiveAbilityCount, (byte)snap.ActiveAbilities.Length);
+                    for (int i = 0; i < count; i++)
                     {
-                        if (snap.ActiveAbilities[i].IsActive)
-                            activeAbilities.Add(snap.ActiveAbilities[i]);
+                        var ability = snap.ActiveAbilities[i];
+                        if (ability.AssetId != 0 && !ability.IsFinished)
+                            activeAbilities.Add(ability);
                     }
                 }
 
@@ -1340,15 +1340,15 @@ namespace ShootingGame.Server
                     FireCooldown = snap.FireCooldown,
                     RotationY = rotationY,
                     IsRunning = isRunning,
-                    IsAiming = _playerIsAiming.GetValueOrDefault(bpId),
-                    IsCrouching = _playerIsCrouching.GetValueOrDefault(bpId),
+                    IsAiming = _ecsWorld.GetCurrentInput(bpId).Aim,
+                    IsCrouching = _ecsWorld.GetCurrentInput(bpId).Crouch,
                     CurrentAmmo = snap.CurrentAmmo,
                     IsReloading = snap.IsReloading,
                     TagBitmask = snap.TagBitmask,
                     ActiveAbilities = activeAbilities,
-                    MaxHp = _playerHeroConfigs.TryGetValue(bpId, out var hc) ? hc.MaxHP : GameConstants.MaxHealth,
-                    Kills = _kills.GetValueOrDefault(bpId),
-                    Deaths = _deaths.GetValueOrDefault(bpId)
+                    MaxHp = _ecsWorld.GetPlayerMaxHealth(bpId),
+                    Kills = _ecsWorld.GetPlayerScore(bpId).Kills,
+                    Deaths = _ecsWorld.GetPlayerScore(bpId).Deaths
                 });
             }
         }
@@ -1365,6 +1365,7 @@ namespace ShootingGame.Server
                 {
                     RequestCode = RequestCode.Battle,
                     ActionCode = ActionCode.BattleFrame,
+                    Timestamp = ServerMatchClock.GetRemainingTicks(_frameId, Context.TimeLimit, _frameInterval),
                     BattleInfo = new BattleInfo
                     {
                         OperationId = _frameId,
@@ -1388,19 +1389,24 @@ namespace ShootingGame.Server
 
         private void EndBattle()
         {
-            if (_hasEnded) return;
+            bool shouldNotifyMatchMaker = false;
+            lock (_lock)
+            {
+                if (_hasEnded) return;
 
-            _hasEnded = true;
-            _gameOverRetransmitRemaining = GameOverRetransmitTicks;
+                _hasEnded = true;
+                _gameOverRetransmitRemaining = GameOverRetransmitTicks;
 
-            Log($"Battle {BattleId} ended. Winner team: {_killerTeamId}");
+                Log($"Battle {BattleId} ended. Winner team: {_killerTeamId}");
 
-            // Clean up gameplay state (no more simulation)
-            _activeBullets.Clear();
-            _positionHistory.Clear();
+                // Clean up gameplay state (no more simulation)
+                _ecsWorld.ClearProjectiles();
+                shouldNotifyMatchMaker = true;
+            }
 
-            // Notify match maker
-            _matchMaker?.EndBattle(BattleId);
+            // Never call back into MatchMaker while holding BattleRoom._lock.
+            if (shouldNotifyMatchMaker)
+                _matchMaker?.EndBattle(BattleId);
         }
 
         /// <summary>
@@ -1419,15 +1425,16 @@ namespace ShootingGame.Server
 
             // 记分板（按击杀降序，平手比死亡少）
             var entries = new List<ScoreEntryMsg>();
-            foreach (var kvp in _kills)
+            foreach (var bpId in _playerIds)
             {
-                var player = Context.Players.Find(pl => Context.GetBattlePlayerId(pl.UserId) == kvp.Key);
+                var player = Context.Players.Find(pl => Context.GetBattlePlayerId(pl.UserId) == bpId);
+                var score = _ecsWorld.GetPlayerScore(bpId);
                 entries.Add(new ScoreEntryMsg
                 {
-                    PlayerId = kvp.Key,
-                    PlayerName = player != null ? player.Username : $"Player_{kvp.Key}",
-                    Kills = kvp.Value,
-                    Deaths = _deaths.GetValueOrDefault(kvp.Key)
+                    PlayerId = bpId,
+                    PlayerName = player != null ? player.Username : $"Player_{bpId}",
+                    Kills = score.Kills,
+                    Deaths = score.Deaths
                 });
             }
             entries.Sort((a, b) => b.Kills != a.Kills ? b.Kills - a.Kills : a.Deaths - b.Deaths);
@@ -1438,7 +1445,29 @@ namespace ShootingGame.Server
 
         public void Stop()
         {
-            _isRunning = false;
+            Thread frameThread;
+            lock (_lock)
+            {
+                _isRunning = false;
+                frameThread = _frameThread;
+                if (frameThread == Thread.CurrentThread)
+                    return;
+            }
+
+            if (frameThread != null && frameThread.IsAlive)
+            {
+                frameThread.Join(1000);
+                if (frameThread.IsAlive)
+                    return;
+            }
+
+            lock (_lock)
+            {
+                if (_frameThread != null && _frameThread.IsAlive)
+                    return;
+                _frameThread = null;
+                _ecsWorld?.Clear();
+            }
         }
 
         /// <summary>
@@ -1446,16 +1475,16 @@ namespace ShootingGame.Server
         /// </summary>
         private int ApplyTagDamageModifiers(int damage, int attackerId, int victimId)
         {
-            // Shield: victim damage resistance (-50%)
+            // Shield: victim damage resistance (-60%)
             var victimEntity = _ecsWorld.GetEntity(victimId);
             if (victimEntity.IsValid && _ecsWorld.EntityManager.HasComponent<TagComponent>(victimEntity))
             {
                 var vTags = _ecsWorld.EntityManager.GetComponent<TagComponent>(victimEntity);
                 if (GameplayTagConfig.Tag_Buff_DamageResist.Matches(vTags.TagBitMask))
-                    damage /= 2;
+                    damage = (int)Math.Ceiling(damage * 0.4f);
             }
 
-            // MarkShot: attacker damage boost (+100%, consumed on first hit)
+            // Legacy path: MarkShot uses the current 1.5x multiplier.
             if (damage > 0)
             {
                 var attackerEntity = _ecsWorld.GetEntity(attackerId);
@@ -1464,7 +1493,7 @@ namespace ShootingGame.Server
                     var aTags = _ecsWorld.EntityManager.GetComponent<TagComponent>(attackerEntity);
                     if (GameplayTagConfig.Tag_Buff_DamageBoost.Matches(aTags.TagBitMask))
                     {
-                        damage *= 2;
+                        damage = (int)Math.Ceiling(damage * 1.5f);
                         // Consume the Buff.DamageBoost tag
                         aTags.TagBitMask &= ~GameplayTagConfig.Tag_Buff_DamageBoost.SelfMask;
                         _ecsWorld.EntityManager.SetComponent(attackerEntity, aTags);
@@ -1517,21 +1546,4 @@ namespace ShootingGame.Server
         }
     }
 
-    /// <summary>
-    /// Server-side bullet entity.
-    /// </summary>
-    public class ServerBullet
-    {
-        public int AttackId;
-        public int OwnerId;
-        public int OwnerTeamId;
-        public ShootingGame.Shared.Hero.GunConfigData Gun;
-        public Vec3 Position;
-        public Vec3 Direction;
-        public float Speed;
-        public float MaxDistance;
-        public float TraveledDistance;
-        public int Damage;
-        public int SpawnFrameId;
-    }
 }

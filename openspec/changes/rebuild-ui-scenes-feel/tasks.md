@@ -15,6 +15,7 @@
 - [x] 2.5 Add the authoritative 300-second match timeout and deterministic time-limit settlement.
 - [x] 2.6 Add fixed-pool ammo shell ejection/fill presentation for firing feedback.
 - [x] 2.7 Rebuild the upper arcade HUD in the editor and display host-authoritative remaining match ticks.
+- [x] 2.8 Broadcast monotonic remaining ticks from the standalone server and settle both game modes at the 300-second cap.
 
 ## 3. Hero select and scene presentation
 
